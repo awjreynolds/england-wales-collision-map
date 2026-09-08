@@ -119,7 +119,7 @@ on each of two pages, CORS returned `*`, `/manifest` reported 493,218 mappable
 collisions, an invalid bounding box returned HTTP 400 and a POST request returned
 HTTP 405.
 
-## Review and remaining release gates
+## Release status and remaining verification
 
 Implementation uses Luna Max agents; source reviews use Astra with low reasoning
 effort, corresponding to the requested Astra Light review.
@@ -128,6 +128,9 @@ Review corrections cover retained school inputs, stricter annual source and join
 validation, immutable publication, query projections, empty-result semantics,
 school coverage denominators, bounded geographic searches and request races.
 The national source, database, code, SQL and deployed Worker checks above are
-complete for the final combined version. Frontend publication is next. Browser
-validation on the Mac is not complete because the browser is locked, so that gate
-remains pending.
+complete for the final combined version. The [national frontend](https://awjreynolds.github.io/weca-collision-map/)
+was published by [GitHub Pages run 34243620756](https://github.com/awjreynolds/weca-collision-map/actions/runs/34243620756).
+Its HTML, JavaScript and stylesheet returned HTTP 200, and the published bundle
+contains the verified production API endpoint and project-directory navigation.
+Final interactive desktop and mobile browser checks remain pending because the
+Mac is locked; HTTP and automated checks do not substitute for those interactions.
