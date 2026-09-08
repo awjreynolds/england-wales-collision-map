@@ -1,0 +1,34 @@
+{
+  "source": {
+    "publisher": "Office for National Statistics",
+    "dataset": "Local Authority Districts (December 2024) Boundaries UK BGC",
+    "datasetUrl": "https://www.data.gov.uk/dataset/af158609-c1ec-40a6-a8ee-0b0feb698463/local-authority-districts-december-2024-boundaries-uk-bgc",
+    "featureServerUrl": "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/Local_Authority_Districts_December_2024_Boundaries_UK_BGC/FeatureServer",
+    "queryUrl": "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/Local_Authority_Districts_December_2024_Boundaries_UK_BGC/FeatureServer/0/query?where=LAD24CD+IN+%28%27E06000022%27%2C%27E06000023%27%2C%27E06000024%27%2C%27E06000025%27%29&outFields=LAD24CD%2CLAD24NM&returnGeometry=true&outSR=4326&f=geojson",
+    "boundaryProduct": "BGC: generalised to 20m and clipped to the coastline",
+    "sourceCrs": "EPSG:4326",
+    "outputCrs": "EPSG:4326",
+    "licence": "Open Government Licence v3.0",
+    "licenceUrl": "https://www.ons.gov.uk/methodology/geography/geographicalproducts/digitalboundaries",
+    "attribution": "Source: Office for National Statistics licensed under the Open Government Licence v.3.0. Contains OS data © Crown copyright and database right 2024."
+  },
+  "generatedAt": "2026-09-08T10:52:47.461Z",
+  "output": {
+    "file": "public/data/boundaries.geojson",
+    "format": "GeoJSON FeatureCollection",
+    "featureCount": 4,
+    "authorityCodes": [
+      "E06000022",
+      "E06000023",
+      "E06000024",
+      "E06000025"
+    ]
+  },
+  "processing": [
+    "Requested only the four study-area LAD24CD values from the official ONS FeatureServer.",
+    "Requested WGS84 output with outSR=4326 for direct MapLibre rendering.",
+    "Validated the expected code/name pair, geometry type, coordinate ranges, feature count and uniqueness.",
+    "Removed the service CRS member from the output because GeoJSON coordinates are emitted as WGS84 longitude/latitude.",
+    "Sorted features by authority code for deterministic output."
+  ]
+}

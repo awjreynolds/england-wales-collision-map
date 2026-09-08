@@ -9,6 +9,8 @@ User explicitly authorizes execution in this map and autonomous resolution of im
 
 ## Decisions so far
 
+- [Establish the data-quality caveat and concentration interpretation](issues/02-quality-and-method.md): primary DfT warnings support a 2022–23 caution window; use bounded ground-distance grouping and four official ONS council polygons.
+
 ## Not yet specified
 Downstream data availability and validation limitations will be settled by source inspection.
 
