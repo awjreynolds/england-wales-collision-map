@@ -1,25 +1,18 @@
 # England & Wales Collision Map
 
-A static React/MapLibre application for exploring reported road injury collisions across **England and Wales**. The national view uses a read-only query service for exact summaries, bounded map results, collision details and explicit persistent-location analysis. A saved West of England preset remains available for **Bristol, Bath & North East Somerset, South Gloucestershire and North Somerset**.
+A static React/MapLibre application for exploring reported road injury collisions across **England and Wales**. The national view runs entirely on GitHub Pages: a browser Web Worker reads compressed static data for exact summaries, bounded map results, collision details and explicit persistent-location analysis. A saved West of England preset remains available for **Bristol, Bath & North East Somerset, South Gloucestershire and North Somerset**.
 
-The current national release covers the five complete calendar years **2021–2025**. It contains 493,271 England/Wales source collision rows, 493,218 mappable collision records, 624,985 recorded casualties, 7,264 fatalities, 119,791 serious injuries and 497,930 slight injuries. Fifty-three source collision rows have no valid map coordinate and remain outside map totals. The school catalogue contains 25,936 mapped establishments: 24,471 in England, 1,440 maintained schools in Wales and 25 Welsh pupil referral units. See the [national verification record](docs/national-verification.md) for the independent count and coordinate checks.
+The current national release covers the five complete calendar years **2021–2025**. It contains 493,271 England/Wales source collision rows, 493,218 mappable collision records, 624,985 recorded casualties, 7,264 fatalities, 119,791 serious injuries and 497,930 slight injuries. Fifty-three source collision rows have no valid map coordinate and remain outside map totals. The school catalogue contains 25,936 mapped establishments: 24,471 in England, 1,440 maintained schools in Wales and 25 Welsh pupil referral units. See the [static release verification](docs/static-pages-verification.md) for the current artifact audit and the [national verification record](docs/national-verification.md) for source count and coordinate checks.
 
 The map represents **reported STATS19 personal-injury collisions**, not every incident on the road network. Collision concentrations are frequency measures, **not exposure-adjusted risk** or proof that a road is intrinsically unsafe.
 
 ## Architecture and national capabilities
 
-The browser downloads a small manifest and query responses from the national Worker. The Worker reads indexed D1 tables containing compact collision rows, precomputed national and authority summaries, map cells, schools and gzip-compressed chunks of the full joined collision, casualty and vehicle evidence. The static frontend never needs the raw national CSV files or a browser API key.
+The application and national data are served from the same GitHub Pages project. A compact overview stores spatial cells and filter-specific summaries. A browser Web Worker combines those summaries, loads local collision files when a viewport cuts through a cell or needs individual records, and performs the bounded hotspot analysis without blocking map interaction. Full linked collision, casualty and vehicle evidence is downloaded separately only when a collision is opened.
 
-The service exposes these read-only routes:
+There is no application API server, Cloudflare dependency, database account or browser access key. The school catalogue is searched locally. Background OpenStreetMap tiles and the explicitly submitted Photon place search remain external services.
 
-- `/manifest` returns the immutable dataset version, five included years, England/Wales extent, authorities, provenance and response limits.
-- `/summary` returns exact collision and casualty totals for the active filters and optional bounding box, including unknown-record counts and completeness flags.
-- `/view` returns an exact `recordCount` plus a bounded point or aggregate-cell response. It caps responses at 2,000 features and 1 MB; aggregate cells are a rendering aid, not the source of totals.
-- `/collision/:id` loads one collision with its linked raw casualty and vehicle evidence on demand.
-- `/schools` searches or bounds the school catalogue and returns its source coverage metadata.
-- `/analysis` runs the explicitly bounded persistent-location and school-proximity screen.
-
-The service accepts the same filter contract for summaries, map views and analysis, while detail requests address one collision in the active dataset by ID. Filters within a dimension use OR; different dimensions use AND. A calendar year means the STATS19 `collision_year` field, not a rolling twelve-month period.
+Filters within a dimension use OR; different dimensions use AND. A calendar year means the STATS19 `collision_year` field, not a rolling twelve-month period.
 
 The sidebar shows two exact summaries. **Selected national scope** applies the active year, country, authority, severity and road-user filters without a map box. **Current map extent** applies those same filters inside the current map bounding box. Panning, zooming or clicking an aggregate cell requests a new exact viewport result. The map may switch between aggregate cells and individual points to stay within response limits, but it does not infer viewport totals by counting rendered features.
 
@@ -36,15 +29,7 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. Set `VITE_API_BASE_URL` to a reachable national query service when running outside the deployed Worker environment; the default `/api` works when the static app and Worker share an origin. Background map tiles require an internet connection.
-
-For a separate local Worker, run it in another terminal and point Vite at its local URL:
-
-```bash
-npm --prefix service install
-npm --prefix service run dev       # normally http://localhost:8787
-VITE_API_BASE_URL=http://localhost:8787 npm run dev
-```
+Open the local URL printed by Vite. The checked-in static national release is available under `public/data/national/`; no separate server or environment variable is required. Background map tiles require an internet connection.
 
 ```bash
 npm run lint
@@ -54,13 +39,13 @@ npm run build
 npm run preview
 ```
 
-The production build is a static `dist/` directory. The public app reads its dataset manifest and query results from the deployed read-only service; no browser API key is required. The national Worker is deployed separately from `service/`.
+The production build is a self-contained static `dist/` directory containing the application, browser worker and compressed data files.
 
 ## Publish to GitHub Pages
 
 The public build is published at [awjreynolds.github.io/england-wales-collision-map](https://awjreynolds.github.io/england-wales-collision-map/). The repository's [Pages workflow](.github/workflows/pages.yml) runs on pushes to `main` and can also be started manually. It installs with `npm ci`, runs lint, typecheck, tests and the production build, then deploys `dist/` through the official GitHub Pages actions.
 
-Vite is configured for the repository subpath `/england-wales-collision-map/`; when previewing a production build locally, open the `/england-wales-collision-map/` path served by `npm run preview`. The application resolves its generated data and boundary assets through Vite's `BASE_URL`, so the same build works from the Pages project path. If the Worker is hosted separately, set `VITE_API_BASE_URL` in the Pages build environment to that Worker URL.
+Vite is configured for the repository subpath `/england-wales-collision-map/`; when previewing a production build locally, open the `/england-wales-collision-map/` path served by `npm run preview`. The application resolves its generated data and boundary assets through Vite's `BASE_URL`, so the same build works from the Pages project path.
 
 ## Terminology
 
@@ -90,7 +75,7 @@ Map aggregates are a display aid. Persistent-location analysis is an explicit bo
 
 ## Architecture and future extensions
 
-The normalized collision/casualty model is independent of source adapters. Ingestion produces canonical local artifacts; the Worker performs indexed filtering and bounded queries; the browser renders the returned points/cells and requests detail or analysis explicitly. This keeps national raw data out of the static bundle while preserving a reusable domain model for future KRN/SATN compilers.
+The normalized collision/casualty model is independent of source adapters. Ingestion produces canonical local artifacts; the static publisher builds spatial summaries and compressed local files; the browser worker performs filtering and bounded analysis while the map renders points and cells. This keeps national raw data out of the static bundle while preserving a reusable domain model for future KRN/SATN compilers.
 
 Future hierarchy: **region → authority → corridor → road segment → junction → collision**. Extension contracts can represent scheme geometry, intervention date and explicit before/after periods, and attach traffic, vehicle-distance, walking or cycling exposure evidence. These contracts do not imply that spatial joins, scheme effects or exposure-adjusted rates have already been implemented.
 
@@ -125,11 +110,13 @@ npm exec tsx scripts/national/build.ts
 # Build the DfE/DataMapWales school catalogue and provenance.
 npm exec tsx scripts/schools/ingest.ts
 
-# Build the ignored D1 SQL import from the canonical collision and school artifacts.
-npm --prefix service run build:sql
+# Build the GitHub Pages static release from the canonical artifacts.
+npm exec tsx scripts/static/build.ts
 ```
 
-The national builder asserts its expected regression totals before publishing an active generation. The D1 import builder validates that every mappable compact collision has a full detail row, emits precomputed summaries and map cells, and writes `data/national/2021-2025/service-import/manifest.json` with the service identity, national version, school-output checksum, importer-transform checksum, file order, row counts and byte sizes. Cache keys therefore change when the national generation, school catalogue or importer transform changes. Inspect those manifests and the provenance outputs before using a refresh.
+The national builder asserts its expected regression totals before publishing an active generation. The static publisher reads the canonical collision and school artifacts and emits a versioned manifest, overview, local collision files, school catalogue and compressed detail files. Inspect the generated counts and provenance before publishing a refresh.
+
+The `service/` directory records the earlier Cloudflare implementation. It is not used by the Pages application or deployment workflow. Existing Cloudflare resources are not automatically modified or removed by this repository.
 
 The existing West of England static snapshot has a separate refresh path:
 
@@ -138,22 +125,15 @@ npm run data:refresh
 npm run data:validate
 ```
 
-`npm run data:refresh` refreshes the regional application snapshot and authority outlines; use `npm run ingest:boundaries` to refresh those outlines alone. It does not replace the national D1 build. Allow time and disk space for fresh upstream downloads; live source services must be reachable when no retained input bundle is available.
+`npm run data:refresh` refreshes the regional application snapshot and authority outlines; use `npm run ingest:boundaries` to refresh those outlines alone. It does not replace the national static build. Allow time and disk space for fresh upstream downloads; live source services must be reachable when no retained input bundle is available.
 
 To fetch upstream revisions, set `WECA_NATIONAL_REFRESH=1` for the national builder or remove the relevant cached regional CSVs before rerunning. To extend the period, update the builder's `YEARS` configuration only after verifying final publication and schema compatibility; the UI reads years from generated data. Per-file provenance includes hashes and local file modification times. The national manifest's `generatedAt` records when the normalized snapshot was written.
 
-## Fresh D1 import, deployment and rollback
+## Static publication and rollback
 
-A national refresh is an isolated database release. Follow [the D1 import runbook](service/IMPORT.md): create a new versioned D1 database, apply `service/migrations/0001_initial.sql` and `0002_detail_chunks.sql`, then load the generated SQL files in the order listed by `service-import/manifest.json` using D1 bulk-import tooling. The files intentionally contain no outer `BEGIN`/`COMMIT`; D1 manages the bulk-import transaction. `00-preflight.sql` refuses a second load into a populated data table, and no import step deletes or resets an active database.
+Run `node --experimental-strip-types scripts/static/verify.ts` to verify every published file, both compressed and decoded checksums, record coverage and overview totals. Run lint, typecheck, tests and the production build before committing the generated release. The Pages workflow repeats these checks and publishes `dist/` when `main` changes.
 
-Before switching traffic, verify the new database's dataset version and collision, detail lookup, detail chunk and school counts. Exercise the exact whole-extent summary, a bounded viewport, one collision detail, school search and the analysis record limit. Run the Worker checks and dry run:
-
-```bash
-npm --prefix service run check
-npm --prefix service run deploy:dry
-```
-
-After validation, update the `database_name` and `database_id` in [`service/wrangler.jsonc`](service/wrangler.jsonc) and deploy from `service/` with `npx wrangler deploy`. Keep the previous database and configuration recorded for rollback. To roll back, restore the previous D1 identifiers in `wrangler.jsonc` and redeploy the Worker; do not overwrite the active database in place. The deployed manifest's dataset version makes a partial or mismatched switch visible to clients.
+The publisher replaces its output only after validating a complete generation. For rollback, restore the previous application and `public/data/national/` release together and republish through Pages. Browser requests include the dataset version and artifact hash so mixed cached generations fail integrity validation rather than returning mismatched evidence.
 
 ## Current limitations
 

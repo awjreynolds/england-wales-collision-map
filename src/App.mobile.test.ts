@@ -172,4 +172,17 @@ describe('mobile hotspot entry point', () => {
     expect(screen.getByText(/below 10,000 matching records/i)).toBeTruthy();
     expect(appLoadAnalysis).not.toHaveBeenCalled();
   });
+
+  it('shows the map request error and retries from the map overlay', async () => {
+    const requestError = new Error('Published map shard unavailable');
+    vi.mocked(appLoadView).mockRejectedValueOnce(requestError).mockResolvedValue(response(view));
+    render(createElement(App));
+
+    await waitFor(() => expect(document.getElementById('map-analysis-status')?.textContent).toContain('Published map shard unavailable'));
+    expect(screen.getByRole('button', { name: 'Retry map request' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry map request' }));
+    await waitFor(() => expect(appLoadView).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.getElementById('map-analysis-status')?.textContent).toContain('Hotspots are hidden'));
+  });
 });

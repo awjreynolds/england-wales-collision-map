@@ -32,15 +32,11 @@ jobs:
         run: npm test
       - name: Test national publication guards
         run: node --import tsx --test scripts/national/build.test.ts
-      - name: Install query service dependencies
-        working-directory: service
-        run: npm ci
-      - name: Check query service
-        working-directory: service
-        run: npm run check
+      - name: Verify static national publication
+        run: |
+          test -s public/data/national/manifest.json
+          node --experimental-strip-types scripts/static/verify.ts
       - name: Build
-        env:
-          VITE_API_BASE_URL: https://weca-national-query.awjreynolds.workers.dev/api
         run: npm run build
       - name: Configure Pages
         uses: actions/configure-pages@v5

@@ -1,30 +1,24 @@
 import type {
   AnalysisPayload,
   ApiResponse,
-  BBox,
   CollisionDetail,
   DatasetManifest,
-  QueryFilters,
   SchoolsPayload,
   SummaryPayload,
   ViewPayload,
 } from '../../service/contract';
+import {
+  StaticDataError,
+  loadStaticAnalysis,
+  loadStaticCollisionDetail,
+  loadStaticManifest,
+  loadStaticSchools,
+  loadStaticSummary,
+  loadStaticView,
+  type StaticQueryOptions,
+} from '../static/runtime';
 
-const configuredApi = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-export const API_BASE_URL = (configuredApi || '/api').replace(/\/$/, '');
-
-export interface QueryOptions {
-  filters: QueryFilters;
-  bbox?: BBox;
-  zoom?: number;
-  radiusMetres?: number;
-  schoolDistanceMetres?: 500 | 1000;
-  schoolId?: string;
-  harmFilter?: 'all' | 'ksi' | 'repeated-ksi' | 'slight-only';
-  query?: string;
-  limit?: number;
-  offset?: number;
-}
+export type QueryOptions = StaticQueryOptions;
 
 const append = (params: URLSearchParams, key: string, values: string | number | undefined): void => {
   if (values !== undefined && values !== '') params.set(key, String(values));
@@ -51,31 +45,15 @@ export const queryString = (options: QueryOptions = { filters: { years: [], auth
   return params.toString();
 };
 
-export class ApiRequestError extends Error {
-  readonly code: string;
-  readonly status: number;
-  constructor(message: string, code: string, status: number) {
-    super(message);
-    this.name = 'ApiRequestError';
-    this.code = code;
-    this.status = status;
-  }
-}
+/** Compatibility name retained for callers that previously handled Worker HTTP errors. */
+export { StaticDataError as ApiRequestError };
 
-const request = async <T>(path: string, options: QueryOptions | undefined, signal?: AbortSignal): Promise<ApiResponse<T>> => {
-  const suffix = options ? queryString(options) : '';
-  const response = await fetch(`${API_BASE_URL}${path}${suffix ? `?${suffix}` : ''}`, { signal, headers: { Accept: 'application/json' } });
-  const body = await response.json() as ApiResponse<T> & { error?: { code?: string; message?: string } };
-  if (!response.ok || body.error) throw new ApiRequestError(body.error?.message ?? `Request failed (${response.status})`, body.error?.code ?? 'request_failed', response.status);
-  return body as ApiResponse<T>;
-};
-
-export const loadManifest = async (signal?: AbortSignal): Promise<ApiResponse<DatasetManifest>> => request<DatasetManifest>('/manifest', undefined, signal);
-export const loadView = async (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<ViewPayload>> => request<ViewPayload>('/view', options, signal);
-export const loadSummary = async (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<SummaryPayload>> => request<SummaryPayload>('/summary', options, signal);
-export const loadAnalysis = async (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<AnalysisPayload>> => request<AnalysisPayload>('/analysis', options, signal);
-export const loadCollisionDetail = async (id: string, signal?: AbortSignal): Promise<ApiResponse<CollisionDetail>> => request<CollisionDetail>(`/collision/${encodeURIComponent(id)}`, undefined, signal);
-export const loadSchools = async (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<SchoolsPayload>> => request<SchoolsPayload>('/schools', options, signal);
+export const loadManifest = (signal?: AbortSignal): Promise<ApiResponse<DatasetManifest>> => loadStaticManifest(signal);
+export const loadView = (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<ViewPayload>> => loadStaticView(options, signal);
+export const loadSummary = (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<SummaryPayload>> => loadStaticSummary(options, signal);
+export const loadAnalysis = (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<AnalysisPayload>> => loadStaticAnalysis(options, signal);
+export const loadCollisionDetail = (id: string, signal?: AbortSignal): Promise<ApiResponse<CollisionDetail>> => loadStaticCollisionDetail(id, signal);
+export const loadSchools = (options: QueryOptions, signal?: AbortSignal): Promise<ApiResponse<SchoolsPayload>> => loadStaticSchools(options, signal);
 
 export const pointFeatureToGeoJson = (view: ViewPayload): GeoJSON.FeatureCollection<GeoJSON.Point, Record<string, unknown>> => ({
   type: 'FeatureCollection',
