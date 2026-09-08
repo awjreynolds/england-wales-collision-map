@@ -23,7 +23,13 @@ npm run build
 npm run preview
 ```
 
-The production build is a static `dist/` directory. No application backend, API key or database is required. Public hosting is outside this milestone.
+The production build is a static `dist/` directory. No application backend, API key or database is required.
+
+## Publish to GitHub Pages
+
+The public build is published at [awjreynolds.github.io/weca-collision-map](https://awjreynolds.github.io/weca-collision-map/). The repository's [Pages workflow](.github/workflows/pages.yml) runs on pushes to `main` and can also be started manually. It installs with `npm ci`, runs lint, typecheck, tests and the production build, then deploys `dist/` through the official GitHub Pages actions.
+
+Vite is configured for the repository subpath `/weca-collision-map/`; when previewing a production build locally, open the `/weca-collision-map/` path served by `npm run preview`. The application resolves its generated data and boundary assets through Vite's `BASE_URL`, so the same build works from the Pages project path.
 
 ## Terminology
 
@@ -66,6 +72,10 @@ This repository records the prompt's resolved ambiguities and source decisions a
 The optional outline uses the ONS December 2024 Local Authority District BGC product, generalized to 20m and clipped to the coastline. It is for map context, not a precise historical boundary audit. The refresh script selects the four official council codes and requests WGS84 GeoJSON. Its separate [boundary provenance](public/data/boundaries.provenance.json) includes the official query and attribution.
 
 Source: Office for National Statistics licensed under the Open Government Licence v.3.0. Contains OS data © Crown copyright and database right 2024.
+
+## Licensing
+
+Original application source code is released under the [MIT License](LICENSE), copyright (c) 2026 Adam Reynolds. The generated STATS19 records and ONS authority boundaries are upstream data products and keep their own terms: DfT STATS19 and the ONS product are licensed under the Open Government Licence v3.0, and the boundary attribution retains the statement about OS data © Crown copyright and database right 2024. The MIT licence does not replace those upstream data terms.
 
 ## Refresh data
 

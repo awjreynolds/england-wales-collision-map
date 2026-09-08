@@ -2,10 +2,12 @@ import { availableYears } from '../domain/filters';
 import { parseCollisionGeoJson, parseMetadata } from '../domain/geojson';
 import type { BoundaryGeoJson, CollisionRecord, ObservatoryMetadata } from '../domain/model';
 
-const COLLISION_PATHS = ['/data/collisions.geojson', '/data/collision_points.geojson', '/data/collisions.json'];
-const METADATA_PATHS = ['/data/metadata.json', '/data/manifest.json', '/data/provenance.json'];
-const BOUNDARY_PATHS = ['/data/boundaries.geojson', '/data/boundary.geojson'];
-const BOUNDARY_PROVENANCE_PATHS = ['/data/boundaries.provenance.json'];
+const assetPath = (path: string): string => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`;
+
+const COLLISION_PATHS = ['data/collisions.geojson', 'data/collision_points.geojson', 'data/collisions.json'].map(assetPath);
+const METADATA_PATHS = ['data/metadata.json', 'data/manifest.json', 'data/provenance.json'].map(assetPath);
+const BOUNDARY_PATHS = ['data/boundaries.geojson', 'data/boundary.geojson'].map(assetPath);
+const BOUNDARY_PROVENANCE_PATHS = ['data/boundaries.provenance.json'].map(assetPath);
 
 export interface BoundaryProvenance {
   source?: {
