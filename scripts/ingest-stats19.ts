@@ -19,7 +19,7 @@ import type {
 export type RawRow = Record<string, string>;
 type DatasetKind = 'collision' | 'vehicle' | 'casualty';
 
-const YEARS = [2020, 2021, 2022, 2023, 2024] as const;
+const YEARS = [2021, 2022, 2023, 2024, 2025] as const;
 const RAW_DIR = resolve('data/raw');
 const OUTPUT_DIR = resolve('public/data');
 const DFT_BASE = 'https://data.dft.gov.uk/road-accidents-safety-data';
@@ -101,22 +101,11 @@ interface YearResult {
 const sourceFor = (year: number, kind: DatasetKind): InputSource => {
   const filename = `dft-road-casualty-statistics-${kind}-${year}.csv`;
   const canonicalUrl = `${DFT_BASE}/${filename}`;
-  // The live DfT directory currently retains only the newest annual files. The
-  // 2020 final file is pinned to an immutable replay of the DfT-hosted object.
-  // This is kept as a retrieval URL so refreshes cannot silently change the
-  // historical input while the canonical provenance remains the DfT URL.
-  const retrievalUrl = year === 2020
-    ? ({
-        collision: 'https://web.archive.org/web/20250404042402id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2020.csv',
-        vehicle: 'https://web.archive.org/web/20250403053929id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2020.csv',
-        casualty: 'https://web.archive.org/web/20250123075344id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2020.csv',
-      }[kind])
-    : canonicalUrl;
   return {
     year,
     kind,
     canonicalUrl,
-    retrievalUrl,
+    retrievalUrl: canonicalUrl,
     localFile: resolve(RAW_DIR, `${kind}-${year}.csv`),
   };
 };
@@ -615,7 +604,6 @@ const main = async (): Promise<void> => {
       'The DfT 2025 data guide is the supported lookup for vehicle_type and casualty_type codes; code 90 means other, while 99 means an unknown self-reported vehicle type and remains evidence of incomplete classification.',
       'Collision concentration is a frequency grouping and is not exposure-adjusted risk or a causal finding.',
       'Pedestrian involvement is based on recorded casualty rows; uninjured road users are not represented by STATS19 casualty rows.',
-      'The 2020 inputs are fixed Internet Archive replays because the live DfT directory no longer retains those annual files; the exact retrieval URLs and hashes are in sourceFiles.',
       'Regional collision rows with missing or out-of-range coordinates are omitted from the map; the validation section records how many were excluded.',
       'Avon and Somerset Police recording completeness may be affected during 2022–23; do not treat those years as perfectly comparable.',
     ],

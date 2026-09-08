@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 
 const DATA_PATH = resolve('public/data/collisions.geojson');
 const PROVENANCE_PATH = resolve('public/data/provenance.json');
-const YEARS = new Set([2020, 2021, 2022, 2023, 2024]);
+const YEARS = new Set([2021, 2022, 2023, 2024, 2025]);
 const AUTHORITIES = new Set(['Bristol', 'Bath and North East Somerset', 'South Gloucestershire', 'North Somerset']);
 
 const number = (value: unknown): number | null => {
@@ -43,7 +43,7 @@ const main = async (): Promise<void> => {
   }
   const validation = provenance.validation ?? {};
   if (validation.outputCollisionFeatures !== geojson.features.length) throw new Error('Provenance feature count does not match GeoJSON.');
-  if (JSON.stringify(provenance.includedYears) !== JSON.stringify([2020, 2021, 2022, 2023, 2024])) throw new Error('Provenance year range is not 2020–2024.');
+  if (JSON.stringify(provenance.includedYears) !== JSON.stringify([2021, 2022, 2023, 2024, 2025])) throw new Error('Provenance year range is not 2021–2025.');
   console.log(`Validated ${geojson.features.length.toLocaleString()} collision features, ${ids.size.toLocaleString()} unique IDs.`);
 };
 

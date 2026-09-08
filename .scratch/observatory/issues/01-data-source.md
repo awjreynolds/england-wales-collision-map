@@ -9,18 +9,17 @@ Blocked by:
 ## Resolution
 
 Use the Department for Transport STATS19 collision, vehicle and casualty CSV
-files for the five complete final years 2020–2024. The refresh script filters
-the four target ONS district codes and joins the three files by collision index
-within each year. The 2020 inputs are fixed Internet Archive replays of the
-original DfT downloads because those annual objects are no longer present in
-the live directory; 2021–2024 use the canonical DfT URLs. Raw national files
-are ignored, while the shipped manifest records each canonical URL, retrieval
-URL, SHA-256, byte count, source-row count, regional-row count and local file
-timestamp.
+files for the five complete final years 2021–2025. DfT's open-data page names
+2025 as the latest final validated year and records that it was added on 30
+July 2026. The refresh script filters the four target ONS district codes and
+joins the three files by collision index within each year. All current inputs
+use the canonical DfT URLs. Raw national files are ignored, while the shipped
+manifest records each canonical URL, retrieval URL, SHA-256, byte count,
+source-row count, regional-row count and local file timestamp.
 
-The normalized GeoJSON contains 7,785 regional collision features. One regional
-collision row with missing or invalid coordinates is omitted and recorded in
-validation. All retained collisions have complete casualty and vehicle row
+The normalized GeoJSON contains 8,033 regional collision features. Every
+regional collision row in this window has usable coordinates. All retained
+collisions have complete casualty and vehicle row
 joins, with individual child references, casualty severity/type codes and
 vehicle type codes retained in `sourceProperties.casualtyRecords` and
 `sourceProperties.vehicleRecords`. Counts derived from joined casualty rows are
@@ -47,8 +46,8 @@ type coverage is incomplete. Integer fields now reject fractional source values
 instead of rounding them. The manifest exposes
 `collisionsWithCompletePedestrianClassification` and uses it with vehicle
 classification coverage for `involvementCoverage`. The regenerated snapshot
-contains 91 fatalities, 1,021 serious casualties and 1,112 KSI casualties over
-9,474 joined casualty rows; no derived severity measure is null.
+contains 97 fatalities, 1,396 serious casualties and 1,493 KSI casualties over
+9,731 joined casualty rows; no derived severity measure is null.
 
 The manifest's `casualtyCoverage` now describes casualty totals and severity
 measures only, and is `complete` for this snapshot. Road-user type coverage is

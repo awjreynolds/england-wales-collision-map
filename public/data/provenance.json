@@ -6,14 +6,14 @@
   "codebookUrl": "https://assets.publishing.service.gov.uk/media/6a63900b2dc18ebe4c3b2bc8/dft-road-casualty-statistics-road-safety-open-dataset-data-guide-2025.xlsx",
   "upstreamDataset": "DfT Road Safety Open Data: collisions, vehicles and casualties",
   "includedYears": [
-    2020,
     2021,
     2022,
     2023,
-    2024
+    2024,
+    2025
   ],
-  "latestYear": 2024,
-  "generatedAt": "2026-09-08T11:22:45.800Z",
+  "latestYear": 2025,
+  "generatedAt": "2026-09-08T11:56:05.839Z",
   "licence": "Open Government Licence v3.0",
   "licenceUrl": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
   "schemaVersion": "weca-collision/v1",
@@ -31,7 +31,6 @@
     "The DfT 2025 data guide is the supported lookup for vehicle_type and casualty_type codes; code 90 means other, while 99 means an unknown self-reported vehicle type and remains evidence of incomplete classification.",
     "Collision concentration is a frequency grouping and is not exposure-adjusted risk or a causal finding.",
     "Pedestrian involvement is based on recorded casualty rows; uninjured road users are not represented by STATS19 casualty rows.",
-    "The 2020 inputs are fixed Internet Archive replays because the live DfT directory no longer retains those annual files; the exact retrieval URLs and hashes are in sourceFiles.",
     "Regional collision rows with missing or out-of-range coordinates are omitted from the map; the validation section records how many were excluded.",
     "Avon and Somerset Police recording completeness may be affected during 2022–23; do not treat those years as perfectly comparable."
   ],
@@ -41,32 +40,32 @@
   "casualtyCoverage": "complete",
   "involvementCoverage": "partial",
   "validation": {
-    "sourceRows": 2064689,
-    "regionalCollisionRows": 7786,
-    "outputCollisionFeatures": 7785,
-    "invalidCollisionRows": 1,
+    "sourceRows": 2103887,
+    "regionalCollisionRows": 8033,
+    "outputCollisionFeatures": 8033,
+    "invalidCollisionRows": 0,
     "duplicateCollisionIds": 0,
-    "casualtyRowsJoined": 9474,
-    "casualtyRowsUnmatched": 631048,
-    "vehicleRowsJoined": 14724,
-    "vehicleRowsUnmatched": 905968,
-    "collisionsWithCompleteCasualtyJoin": 7785,
-    "collisionsWithCompleteVehicleJoin": 7785,
-    "collisionsWithCompleteCasualtySeverity": 7785,
-    "collisionsWithCompletePedestrianClassification": 7492,
-    "collisionsWithCompleteCasualtyClassification": 7492,
-    "collisionsWithCompleteVehicleClassification": 7409,
+    "casualtyRowsJoined": 9731,
+    "casualtyRowsUnmatched": 643090,
+    "vehicleRowsJoined": 15174,
+    "vehicleRowsUnmatched": 922091,
+    "collisionsWithCompleteCasualtyJoin": 8033,
+    "collisionsWithCompleteVehicleJoin": 8033,
+    "collisionsWithCompleteCasualtySeverity": 8033,
+    "collisionsWithCompletePedestrianClassification": 7688,
+    "collisionsWithCompleteCasualtyClassification": 7688,
+    "collisionsWithCompleteVehicleClassification": 7583,
     "collisionsWithUnknownCasualtySeverity": 0,
     "duplicateCasualtyChildKeys": 0,
     "duplicateVehicleChildKeys": 0,
     "collisionsWithUnknownSeverity": 0,
-    "collisionsWithMissingCoordinates": 1,
+    "collisionsWithMissingCoordinates": 0,
     "years": [
-      2020,
       2021,
       2022,
       2023,
-      2024
+      2024,
+      2025
     ],
     "authorities": [
       "Bath and North East Somerset",
@@ -76,42 +75,6 @@
     ]
   },
   "sourceFiles": [
-    {
-      "year": 2020,
-      "kind": "collision",
-      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2020.csv",
-      "retrievalUrl": "https://web.archive.org/web/20250404042402id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2020.csv",
-      "localFile": "data/raw/collision-2020.csv",
-      "sha256": "afeb242ca2233a16ecbaaab460f42ba9ddb1011f3124c157438a9b2f2553ea7b",
-      "bytes": 15192273,
-      "localFileModifiedAt": "2026-09-08T10:50:38.357Z",
-      "sourceRows": 91199,
-      "regionalRows": 1407
-    },
-    {
-      "year": 2020,
-      "kind": "vehicle",
-      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2020.csv",
-      "retrievalUrl": "https://web.archive.org/web/20250403053929id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2020.csv",
-      "localFile": "data/raw/vehicle-2020.csv",
-      "sha256": "bafc40afbca5e88d4f22b6e9adc113e6d29bbdb8a3cd131d7d7fdfea8e071697",
-      "bytes": 21104872,
-      "localFileModifiedAt": "2026-09-08T10:50:50.251Z",
-      "sourceRows": 167375,
-      "regionalRows": 2643
-    },
-    {
-      "year": 2020,
-      "kind": "casualty",
-      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2020.csv",
-      "retrievalUrl": "https://web.archive.org/web/20250123075344id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2020.csv",
-      "localFile": "data/raw/casualty-2020.csv",
-      "sha256": "edab9ec2c46bee4791467aba244e72e44faee79987567208050a1859bbab3727",
-      "bytes": 8681364,
-      "localFileModifiedAt": "2026-09-08T10:50:34.172Z",
-      "sourceRows": 115584,
-      "regionalRows": 1733
-    },
     {
       "year": 2021,
       "kind": "collision",
@@ -255,6 +218,42 @@
       "localFileModifiedAt": "2026-09-08T10:50:38.516Z",
       "sourceRows": 128272,
       "regionalRows": 2007
+    },
+    {
+      "year": 2025,
+      "kind": "collision",
+      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2025.csv",
+      "retrievalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2025.csv",
+      "localFile": "data/raw/collision-2025.csv",
+      "sha256": "633249567e95479a1c30b3f10b0a6271ced11684fb338d0b8b4054ca94b80aa6",
+      "bytes": 19349153,
+      "localFileModifiedAt": "2026-09-08T11:48:58.557Z",
+      "sourceRows": 101525,
+      "regionalRows": 1654
+    },
+    {
+      "year": 2025,
+      "kind": "vehicle",
+      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2025.csv",
+      "retrievalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2025.csv",
+      "localFile": "data/raw/vehicle-2025.csv",
+      "sha256": "78b23539d0e7a1ccae9906c769b577c32f8b80ecc08d002e57abc6516b0431eb",
+      "bytes": 20688988,
+      "localFileModifiedAt": "2026-09-08T11:48:59.357Z",
+      "sourceRows": 183948,
+      "regionalRows": 3093
+    },
+    {
+      "year": 2025,
+      "kind": "casualty",
+      "canonicalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2025.csv",
+      "retrievalUrl": "https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2025.csv",
+      "localFile": "data/raw/casualty-2025.csv",
+      "sha256": "cae4912c6cc29efcd7a20b6cbc7132e310478700dd06d80f46d2d92c86687c76",
+      "bytes": 10062743,
+      "localFileModifiedAt": "2026-09-08T11:48:56.437Z",
+      "sourceRows": 127883,
+      "regionalRows": 1990
     }
   ]
 }

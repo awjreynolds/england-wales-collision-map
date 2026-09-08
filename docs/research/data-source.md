@@ -1,10 +1,10 @@
-# Data source decision: DfT STATS19, 2020–2024
+# Data source decision: DfT STATS19, 2021–2025
 
 ## Resolution
 
 Use the Department for Transport (DfT) STATS19 record-level open data as the
 source of truth. The refresh script reads the collision, vehicle and casualty
-CSV for each final year from 2020 through 2024, filters to the four target ONS
+CSV for each final year from 2021 through 2025, filters to the four target ONS
 local-authority districts, and joins the three tables by the source collision
 index within each year.
 
@@ -18,7 +18,8 @@ the normalized map properties are deliberately a small stable contract while
 
 - [DfT Road safety open data](https://www.gov.uk/government/statistical-data-sets/road-safety-open-data)
   describes the collision, vehicle and casualty record files, the annual final
-  release cycle, the coded field guide and the Open Government Licence.
+  release cycle, confirms that 2025 is the latest final validated year (added
+  30 July 2026), and states the coded field guide and Open Government Licence.
 - [DfT STATS19 forms and guidance](https://www.gov.uk/government/publications/stats19-forms-and-guidance)
   is the first-party specification for the collision and casualty collection.
 - [DfT Road Safety Open Data: 2025 data guide](https://assets.publishing.service.gov.uk/media/6a63900b2dc18ebe4c3b2bc8/dft-road-casualty-statistics-road-safety-open-dataset-data-guide-2025.xlsx)
@@ -42,19 +43,13 @@ The canonical files are named by DfT as follows:
 https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-{collision,vehicle,casualty}-YYYY.csv
 ```
 
-The live DfT directory no longer retains the 2020 annual objects. The refresh
-therefore pins the 2020 files to immutable replays of the original DfT-hosted
-objects. The canonical DfT URL remains in `public/data/provenance.json`, while
-the fixed retrieval URL records the exact replay used:
-
-- [2020 collisions replay](https://web.archive.org/web/20250404042402id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-collision-2020.csv)
-- [2020 vehicles replay](https://web.archive.org/web/20250403053929id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-vehicle-2020.csv)
-- [2020 casualties replay](https://web.archive.org/web/20250123075344id_/https://data.dft.gov.uk/road-accidents-safety-data/dft-road-casualty-statistics-casualty-2020.csv)
-
-For 2021–2024 the refresh uses the direct DfT URLs. The 2020 files use the
-older `accident_*` column names; the 2021–2024 files use `collision_*` names.
-The adapter accepts both spellings and emits one normalized schema. Raw files
-are downloaded to `data/raw/` for a refresh and are excluded from Git.
+The current refresh uses the direct DfT URLs for all five final annual files,
+2021–2025. The DfT page identifies the 2025 collision, vehicle and casualty
+files as the latest full year of final validated data and records their 30 July
+2026 publication update. The current annual files use `collision_*` column
+names; the adapter also accepts the older `accident_*` spellings for historical
+schema compatibility. Raw files are downloaded to `data/raw/` for a refresh
+and are excluded from Git.
 
 ## Normalized contract
 

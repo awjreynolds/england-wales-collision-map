@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
-import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapMouseEvent, type StyleSpecification } from 'maplibre-gl';
+import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSONFeature, type StyleSpecification } from 'maplibre-gl';
 import type { BoundaryGeoJson, CollisionRecord, PersistentLocation } from '../domain/model';
 import { SEVERITY_STYLES, OBSERVATORY_CONFIG } from '../domain/config';
+import type { ViewportBounds } from '../domain/viewport';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 interface MapViewProps {
@@ -13,6 +14,7 @@ interface MapViewProps {
   focusLocation: PersistentLocation | null;
   showPersistentLocations: boolean;
   onLocationSelect: (location: PersistentLocation) => void;
+  onViewportBoundsChange: (bounds: ViewportBounds) => void;
 }
 
 const MAP_STYLE: StyleSpecification = {
@@ -118,21 +120,34 @@ const mapBoundsFromFeatures = (records: CollisionRecord[]): maplibregl.LngLatBou
   return bounds;
 };
 
+const viewportBoundsFromMap = (map: MapLibreMap): ViewportBounds => {
+  const bounds = map.getBounds();
+  return {
+    west: bounds.getWest(),
+    east: bounds.getEast(),
+    south: bounds.getSouth(),
+    north: bounds.getNorth(),
+  };
+};
+
 const ensureSource = (map: MapLibreMap, id: string, data: GeoJSON.GeoJSON, options?: Record<string, unknown>): void => {
   if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data, ...(options ?? {}) } as maplibregl.GeoJSONSourceSpecification);
 };
 
-export const MapView = ({ records, regionRecords, locations, boundaries, resetViewSignal, focusLocation, showPersistentLocations, onLocationSelect }: MapViewProps) => {
+export const MapView = ({ records, regionRecords, locations, boundaries, resetViewSignal, focusLocation, showPersistentLocations, onLocationSelect, onViewportBoundsChange }: MapViewProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const mapReadyRef = useRef(false);
   const pendingMapTasksRef = useRef<Array<() => void>>([]);
+  const popupRef = useRef<maplibregl.Popup | null>(null);
   const regionBoundsRef = useRef<maplibregl.LngLatBounds | null>(null);
   const regionRecordsRef = useRef(regionRecords);
   const onLocationSelectRef = useRef(onLocationSelect);
+  const onViewportBoundsChangeRef = useRef(onViewportBoundsChange);
   const recordsRef = useRef(records);
   const locationsRef = useRef(locations);
   onLocationSelectRef.current = onLocationSelect;
+  onViewportBoundsChangeRef.current = onViewportBoundsChange;
   recordsRef.current = records;
   locationsRef.current = locations;
   regionRecordsRef.current = regionRecords;
@@ -152,9 +167,23 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
       minZoom: OBSERVATORY_CONFIG.map.minZoom,
       maxZoom: OBSERVATORY_CONFIG.map.maxZoom,
       attributionControl: false,
-      cooperativeGestures: true,
+      cooperativeGestures: false,
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
     });
     mapRef.current = map;
+    map.touchZoomRotate.disableRotation();
+    map.keyboard?.disableRotation();
+    const reportViewportBounds = () => onViewportBoundsChangeRef.current(viewportBoundsFromMap(map));
+    const openPopup = (coordinates: [number, number], content: HTMLElement): void => {
+      popupRef.current?.remove();
+      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
+        .setLngLat(coordinates)
+        .setDOMContent(content)
+        .addTo(map);
+      popupRef.current = popup;
+    };
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
 
@@ -215,41 +244,61 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
       const bounds = regionBoundsRef.current ?? mapBoundsFromFeatures(regionRecords);
       if (bounds && !bounds.isEmpty()) map.fitBounds(bounds, { padding: 48, maxZoom: 12, duration: 0 });
       mapReadyRef.current = true;
+      reportViewportBounds();
       const pendingTasks = pendingMapTasksRef.current.splice(0);
       pendingTasks.forEach((task) => task());
     });
 
-    map.on('click', 'collision-clusters', (event) => {
-      const feature = map.queryRenderedFeatures(event.point, { layers: ['collision-clusters'] })[0];
-      if (!feature) return;
-      const clusterId = feature.properties?.cluster_id;
-      const source = map.getSource('collisions') as GeoJSONSource | undefined;
-      if (source && typeof clusterId === 'number') {
-        source.getClusterExpansionZoom(clusterId).then((zoom) => {
-          const coordinates = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
-          map.easeTo({ center: coordinates, zoom });
-        }).catch(() => undefined);
+    // One map-level click handler gives overlapping layers a deterministic priority
+    // and ensures a new popup always replaces the previous one.
+    map.on('click', (event) => {
+      const features = map.queryRenderedFeatures(event.point, { layers: ['persistent-locations', 'collision-points', 'collision-clusters'] });
+      const persistentFeature = features.find((feature) => feature.layer?.id === 'persistent-locations');
+      const collisionFeature = features.find((feature) => feature.layer?.id === 'collision-points');
+      const clusterFeature = features.find((feature) => feature.layer?.id === 'collision-clusters');
+      const pointCoordinates = (feature: MapGeoJSONFeature | undefined): [number, number] | null => {
+        if (!feature || feature.geometry.type !== 'Point') return null;
+        return feature.geometry.coordinates as [number, number];
+      };
+
+      // A selected persistent location represents the aggregate the user enabled,
+      // so it wins when its larger marker overlaps an individual collision point.
+      if (persistentFeature) {
+        const id = String(persistentFeature.properties?.id ?? persistentFeature.id ?? '');
+        const location = locationsRef.current.find((candidate) => candidate.id === id);
+        const coordinates = pointCoordinates(persistentFeature);
+        if (location && coordinates) {
+          onLocationSelectRef.current(location);
+          openPopup(coordinates, locationPopup(location));
+          return;
+        }
       }
+      if (collisionFeature) {
+        const id = String(collisionFeature.properties?.id ?? collisionFeature.id ?? '');
+        const record = recordsRef.current.find((candidate) => candidate.id === id);
+        const coordinates = pointCoordinates(collisionFeature);
+        if (record && coordinates) {
+          openPopup(coordinates, collisionPopup(record));
+          return;
+        }
+      }
+      if (clusterFeature) {
+        const clusterId = clusterFeature.properties?.cluster_id;
+        const source = map.getSource('collisions') as GeoJSONSource | undefined;
+        const coordinates = pointCoordinates(clusterFeature);
+        if (source && typeof clusterId === 'number' && coordinates) {
+          popupRef.current?.remove();
+          popupRef.current = null;
+          source.getClusterExpansionZoom(clusterId).then((zoom) => {
+            map.easeTo({ center: coordinates, zoom });
+          }).catch(() => undefined);
+          return;
+        }
+      }
+      popupRef.current?.remove();
+      popupRef.current = null;
     });
-    map.on('click', 'collision-points', (event: MapMouseEvent) => {
-      const feature = map.queryRenderedFeatures(event.point, { layers: ['collision-points'] })[0];
-      if (!feature) return;
-      const id = String(feature.properties?.id ?? feature.id ?? '');
-      const record = recordsRef.current.find((candidate) => candidate.id === id);
-      if (!record) return;
-      const coordinates = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
-      new maplibregl.Popup({ closeButton: true, maxWidth: '320px' }).setLngLat(coordinates).setDOMContent(collisionPopup(record)).addTo(map);
-    });
-    map.on('click', 'persistent-locations', (event) => {
-      const feature = map.queryRenderedFeatures(event.point, { layers: ['persistent-locations'] })[0];
-      if (!feature) return;
-      const id = String(feature.properties?.id ?? feature.id ?? '');
-      const location = locationsRef.current.find((candidate) => candidate.id === id);
-      if (!location) return;
-      onLocationSelectRef.current(location);
-      const coordinates = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
-      new maplibregl.Popup({ closeButton: true, maxWidth: '320px' }).setLngLat(coordinates).setDOMContent(locationPopup(location)).addTo(map);
-    });
+    map.on('moveend', reportViewportBounds);
     for (const layer of ['collision-clusters', 'collision-points', 'persistent-locations']) {
       map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
@@ -260,6 +309,8 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
       observer.observe(containerRef.current);
       return () => {
         observer.disconnect();
+        popupRef.current?.remove();
+        popupRef.current = null;
         mapReadyRef.current = false;
         pendingMapTasksRef.current = [];
         map.remove();
@@ -270,6 +321,8 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
     window.addEventListener('resize', resize);
     return () => {
       window.removeEventListener('resize', resize);
+      popupRef.current?.remove();
+      popupRef.current = null;
       mapReadyRef.current = false;
       pendingMapTasksRef.current = [];
       map.remove();
@@ -286,6 +339,8 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
     const update = () => {
       const currentMap = mapRef.current;
       if (!currentMap) return;
+      popupRef.current?.remove();
+      popupRef.current = null;
       const source = currentMap.getSource('collisions') as GeoJSONSource | undefined;
       if (source) source.setData(sourceData(records));
       const hotspotSource = currentMap.getSource('persistent-locations') as GeoJSONSource | undefined;
@@ -305,6 +360,8 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
     runWhenMapReady(() => {
       const currentMap = mapRef.current;
       if (!currentMap) return;
+      popupRef.current?.remove();
+      popupRef.current = null;
       const bounds = regionBoundsRef.current ?? mapBoundsFromFeatures(regionRecordsRef.current);
       if (bounds && !bounds.isEmpty()) currentMap.fitBounds(bounds, { padding: 48, maxZoom: 12, duration: 700 });
       else currentMap.easeTo({ center: OBSERVATORY_CONFIG.map.centre, zoom: OBSERVATORY_CONFIG.map.zoom });
@@ -318,6 +375,10 @@ export const MapView = ({ records, regionRecords, locations, boundaries, resetVi
       const currentMap = mapRef.current;
       if (!currentMap || !currentMap.getLayer('persistent-locations')) return;
       currentMap.setLayoutProperty('persistent-locations', 'visibility', showPersistentLocations ? 'visible' : 'none');
+      if (!showPersistentLocations) {
+        popupRef.current?.remove();
+        popupRef.current = null;
+      }
     });
   }, [showPersistentLocations]);
 

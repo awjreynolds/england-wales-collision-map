@@ -6,6 +6,7 @@ import { groupPersistentLocations } from './domain/analysis';
 import { availableAuthorities, availableYears, DEFAULT_FILTERS, filterRecords, summarizeRecords, type DimensionFilter, type FilterState } from './domain/filters';
 import { DATA_QUALITY_METADATA } from './domain/dataQuality';
 import type { CollisionRecord, PersistentLocation, Severity } from './domain/model';
+import { recordsInViewport, summarizeCasualtySeverities, type ViewportBounds } from './domain/viewport';
 import './styles.css';
 
 const numberFormat = new Intl.NumberFormat('en-GB');
@@ -114,6 +115,50 @@ const Summary = ({ records, casualtyCoverage }: { records: CollisionRecord[]; ca
   );
 };
 
+const viewportValue = (value: number | null, recordCount: number): string => recordCount === 0 ? '0' : displayNumber(value);
+
+const ViewportSummary = ({ records, matchingCount }: { records: CollisionRecord[]; matchingCount: number }) => {
+  const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 540px)').matches === true);
+  const summary = useMemo(() => summarizeRecords(records), [records]);
+  const casualty = useMemo(() => summarizeCasualtySeverities(records), [records]);
+  const incomplete = records.filter((record) => record.casualtyCount === null || record.fatalities === null || record.seriousCasualties === null || record.casualtyCount < (record.fatalities ?? 0) + (record.seriousCasualties ?? 0)).length;
+  const collisionMetrics = [
+    { label: 'Fatal', value: summary.fatalCollisions, className: 'fatal' },
+    { label: 'Serious', value: summary.seriousCollisions, className: 'serious' },
+    { label: 'Slight', value: summary.slightCollisions, className: 'slight' },
+    { label: 'Unknown', value: summary.unknownSeverity, className: 'unknown' },
+  ];
+  const casualtyMetrics = [
+    { label: 'Fatalities', value: casualty.fatalities, unknown: casualty.fatalitiesUnknown, className: 'fatal' },
+    { label: 'Seriously injured', value: casualty.serious, unknown: casualty.seriousUnknown, className: 'serious' },
+    { label: 'Slightly injured', value: casualty.slight, unknown: casualty.slightUnknown, className: 'slight' },
+  ];
+  return <section className="viewport-panel" aria-labelledby="viewport-summary-heading">
+    <div className="viewport-panel-heading">
+      <div><p className="section-kicker">Current map extent</p><h2 id="viewport-summary-heading">Visible totals</h2></div>
+      <div className="viewport-heading-tools"><span className="viewport-count">{numberFormat.format(records.length)} of {numberFormat.format(matchingCount)} visible<br />{viewportValue(summary.casualties, records.length)} casualties</span><button className="viewport-toggle" type="button" aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}>{collapsed ? 'Show breakdown' : 'Hide breakdown'}</button></div>
+    </div>
+    {!collapsed && <>
+      <div className="viewport-breakdown">
+      <div className="viewport-breakdown-group">
+        <h3>Collision severity <span>events</span></h3>
+        <div className="viewport-metrics">
+          {collisionMetrics.map((metric) => <div className={`viewport-metric metric-${metric.className}`} key={metric.label}><span>{metric.label}</span><strong>{numberFormat.format(metric.value)}</strong></div>)}
+        </div>
+      </div>
+      <div className="viewport-breakdown-group">
+        <h3>Casualty severity <span>{viewportValue(summary.casualties, records.length)} casualties</span></h3>
+        <div className="viewport-metrics">
+          {casualtyMetrics.map((metric) => <div className={`viewport-metric metric-${metric.className}`} key={metric.label}><span>{metric.label}{metric.unknown > 0 ? '*' : ''}</span><strong>{viewportValue(metric.value, records.length)}</strong></div>)}
+        </div>
+      </div>
+      </div>
+      <p className="viewport-note">Updates as you pan, zoom or filter. Casualties are people injured in these collisions.</p>
+      <details className="viewport-method"><summary>About these totals</summary><p>Collision severity counts events. Slightly injured is derived from recorded casualties minus fatalities and serious injuries. {records.length === 0 ? 'No matching records are visible.' : incomplete > 0 ? `${numberFormat.format(incomplete)} matching record${incomplete === 1 ? '' : 's'} lack a complete casualty-severity split.` : 'All three casualty-severity inputs are recorded for these records.'}</p></details>
+    </>}
+  </section>;
+};
+
 const MultiSelectGroup = ({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (value: string, checked: boolean) => void }) => (
   <fieldset className="filter-fieldset">
     <legend>{label}</legend>
@@ -172,7 +217,7 @@ const Filters = ({ records, filters, setFilters, metadata, onReset }: { records:
       </div>
       <p className="filter-hint">No selection includes all values.</p>
       <fieldset className="filter-fieldset">
-        <legend>Year{filters.years.length ? ` (${filters.years.length} selected)` : ''}</legend>
+        <legend>Calendar year{filters.years.length ? ` (${filters.years.length} selected)` : ''}</legend>
         <div className="year-options">
           {years.map((year) => <label className="check-option" key={year}><input type="checkbox" checked={filters.years.includes(year)} onChange={(event) => toggle('years', year, event.target.checked)} /><span>{year}</span></label>)}
         </div>
@@ -211,9 +256,10 @@ const CouncilBreakdown = ({ records }: { records: CollisionRecord[] }) => {
 const PersistentPanel = ({ locations, radiusMetres, onRadiusChange, selectedId, onSelect }: { locations: PersistentLocation[]; radiusMetres: number; onRadiusChange: (radius: number) => void; selectedId: string | null; onSelect: (location: PersistentLocation) => void }) => (
   <section className="persistent-panel" aria-labelledby="persistent-heading">
     <div className="section-heading-row"><div><p className="section-kicker">Spatial concentration</p><h2 id="persistent-heading">Persistent locations</h2></div><span className="result-count">{locations.length}</span></div>
-    <p className="panel-copy">Repeated collision locations with at least 3 collisions across 2 or more years. This is frequency, not exposure-adjusted risk or an official site assessment.</p>
-    <label className="range-field"><span>Grouping radius <strong>{radiusMetres}m</strong></span><input type="range" min="50" max={OBSERVATORY_CONFIG.grouping.maxRadiusMetres} step="10" value={radiusMetres} onChange={(event) => onRadiusChange(Number(event.target.value))} /></label>
-    {locations.length ? <ol className="location-list">{locations.slice(0, 8).map((location, index) => <li key={location.id}><button type="button" className={`location-item ${selectedId === location.id ? 'selected' : ''}`} onClick={() => onSelect(location)}><span className="location-rank">{String(index + 1).padStart(2, '0')}</span><span className="location-copy"><strong>{location.collisions} collisions</strong><span>{location.years.join(' · ')}</span><small>{location.fatalCollisions} fatal · {location.seriousCollisions} serious · {location.slightCollisions} slight</small></span><span className="location-arrow" aria-hidden="true">↗</span></button></li>)}</ol> : <div className="empty-panel"><strong>No persistent locations in this selection</strong><span>Try more years or clear a filter. A single year cannot meet the persistence threshold.</span></div>}
+    <p className="panel-copy">A persistent location has at least {OBSERVATORY_CONFIG.grouping.minCollisions} collisions across at least {OBSERVATORY_CONFIG.grouping.minYears} distinct calendar years in the active selection. The purple overlay groups these same collision records; it adds no collisions, and grouping is calculated from the filtered regional selection independently of the current viewport. It shows repeated frequency, not exposure-adjusted risk or an official site assessment.</p>
+    <details className="method-disclosure"><summary>How the grouping works</summary><p>Selected collisions are sorted by stable collision ID. The first unassigned collision anchors a group, then still-unassigned collisions within the radius of that anchor join it. This deterministic anchored method avoids chain-merging distant points; a group's overall diameter can reach twice the radius.</p></details>
+    <label className="range-field"><span>Anchor radius <strong>{radiusMetres}m</strong></span><input type="range" min="50" max={OBSERVATORY_CONFIG.grouping.maxRadiusMetres} step="10" value={radiusMetres} onChange={(event) => onRadiusChange(Number(event.target.value))} /></label>
+    {locations.length ? <ol className="location-list">{locations.slice(0, 8).map((location, index) => <li key={location.id}><button type="button" className={`location-item ${selectedId === location.id ? 'selected' : ''}`} onClick={() => onSelect(location)}><span className="location-rank">{String(index + 1).padStart(2, '0')}</span><span className="location-copy"><strong>{location.collisions} collisions</strong><span>{location.years.join(' · ')} calendar years</span><small>{location.fatalCollisions} fatal · {location.seriousCollisions} serious · {location.slightCollisions} slight</small></span><span className="location-arrow" aria-hidden="true">↗</span></button></li>)}</ol> : <div className="empty-panel"><strong>No persistent locations in this selection</strong><span>Try more years or clear a filter. A single calendar year cannot meet the persistence threshold.</span></div>}
   </section>
 );
 
@@ -253,8 +299,10 @@ export const App = () => {
   const [selectedLocation, setSelectedLocation] = useState<PersistentLocation | null>(null);
   const [showPersistentLocations, setShowPersistentLocations] = useState(false);
   const [resetViewSignal, setResetViewSignal] = useState(0);
+  const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
   const records = useMemo(() => state.data?.records ?? [], [state.data]);
   const filteredRecords = useMemo(() => filterRecords(records, filters), [records, filters]);
+  const viewportRecords = useMemo(() => viewportBounds ? recordsInViewport(filteredRecords, viewportBounds) : null, [filteredRecords, viewportBounds]);
   const locations = useMemo(() => groupPersistentLocations(filteredRecords, radiusMetres, OBSERVATORY_CONFIG.grouping.minCollisions, OBSERVATORY_CONFIG.grouping.minYears), [filteredRecords, radiusMetres]);
   const resetFilters = () => { setFilters(DEFAULT_FILTERS); setSelectedLocation(null); };
   const resetMapView = () => { setSelectedLocation(null); setResetViewSignal((value) => value + 1); };
@@ -268,7 +316,7 @@ export const App = () => {
   return <div className="app-shell">
     <header className="app-header"><div className="header-inner"><div className="brand-mark" aria-hidden="true"><span>WE</span><i /></div><div><p className="eyebrow">West of England · Road safety evidence</p><h1>{OBSERVATORY_CONFIG.title}</h1><p className="subtitle">{OBSERVATORY_CONFIG.subtitle}</p></div><div className="header-status"><span className="status-dot" aria-hidden="true" />Local snapshot<br /><strong>{latestYear ? `through ${latestYear}` : sourceLabel}</strong><nav className="header-links" aria-label="Project links"><a href="https://awjreynolds.github.io/">All projects</a><a href="https://github.com/awjreynolds/weca-collision-map">Source</a></nav></div></div></header>
     <main className="workspace">
-      <section className="map-column" aria-label="Regional collision map"><div className="map-toolbar"><div><span className="map-toolbar-label">Map view</span><strong>{numberFormat.format(filteredRecords.length)} matching collision{filteredRecords.length === 1 ? '' : 's'}</strong></div><div className="map-toolbar-actions"><label className="map-toggle"><input type="checkbox" checked={showPersistentLocations} onChange={(event) => setShowPersistentLocations(event.target.checked)} /><span>Persistent locations</span></label><button className="map-reset" type="button" onClick={resetMapView}>Reset to region</button></div></div><div className="map-frame"><MapView records={filteredRecords} regionRecords={records} locations={locations} boundaries={data.boundaries} resetViewSignal={resetViewSignal} focusLocation={selectedLocation} showPersistentLocations={showPersistentLocations} onLocationSelect={(location) => { setSelectedLocation(location); setShowPersistentLocations(true); }} /><div className="map-legend" aria-label="Severity legend"><span>Severity</span>{SEVERITY_ORDER.map((severity) => <span key={severity}><i style={{ backgroundColor: SEVERITY_STYLES[severity].colour }} />{severityDescription(severity)}</span>)}<span><i className="legend-cluster" />Cluster</span>{showPersistentLocations && <span><i className="legend-hotspot" />Persistent location</span>}</div>{filteredRecords.length === 0 && <div className="map-empty"><strong>No records match these filters</strong><span>Clear or broaden a filter to restore the map.</span></div>}</div></section>
+      <section className="map-column" aria-label="Regional collision map"><div className="map-toolbar"><div><span className="map-toolbar-label">Map view</span><strong>{numberFormat.format(filteredRecords.length)} matching collision{filteredRecords.length === 1 ? '' : 's'}</strong></div><div className="map-toolbar-actions"><label className="map-toggle"><input type="checkbox" checked={showPersistentLocations} onChange={(event) => setShowPersistentLocations(event.target.checked)} /><span>Persistent locations</span></label><button className="map-reset" type="button" onClick={resetMapView}>Reset to region</button></div></div><div className="map-frame"><MapView records={filteredRecords} regionRecords={records} locations={locations} boundaries={data.boundaries} resetViewSignal={resetViewSignal} focusLocation={selectedLocation} showPersistentLocations={showPersistentLocations} onLocationSelect={(location) => { setSelectedLocation(location); setShowPersistentLocations(true); }} onViewportBoundsChange={(nextBounds) => setViewportBounds((current) => current && current.west === nextBounds.west && current.east === nextBounds.east && current.south === nextBounds.south && current.north === nextBounds.north ? current : nextBounds)} />{viewportRecords ? <ViewportSummary records={viewportRecords} matchingCount={filteredRecords.length} /> : <div className="viewport-panel viewport-loading"><span className="section-kicker">Current map extent</span><strong>Reading visible records…</strong></div>}<div className="map-legend" aria-label="Severity legend"><span>Severity</span>{SEVERITY_ORDER.map((severity) => <span key={severity}><i style={{ backgroundColor: SEVERITY_STYLES[severity].colour }} />{severityDescription(severity)}</span>)}<span><i className="legend-cluster" />Cluster</span>{showPersistentLocations && <span><i className="legend-hotspot" />Persistent location</span>}</div>{filteredRecords.length === 0 && <div className="map-empty"><strong>No records match these filters</strong><span>Clear or broaden a filter to restore the map.</span></div>}</div></section>
       <aside className="sidebar"><div className="sidebar-scroll"><DataQualityNote data={data} /><Summary records={filteredRecords} casualtyCoverage={data.metadata.casualtyCoverage} /><Filters records={records} filters={filters} setFilters={setFilters} metadata={data.metadata} onReset={resetFilters} /><CouncilBreakdown records={filteredRecords} /><PersistentPanel locations={locations} radiusMetres={radiusMetres} onRadiusChange={(value) => { setRadiusMetres(value); setSelectedLocation(null); }} selectedId={selectedLocation?.id ?? null} onSelect={focusLocation} /><ProvenancePanel data={data} /><p className="footer-note">Reported STATS19 injury collisions are a record of reported harm, not every incident on the road network. {sourceLabel} · {data.sourcePath}</p></div></aside>
     </main>
   </div>;
