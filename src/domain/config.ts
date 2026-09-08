@@ -22,9 +22,9 @@ export const SEVERITY_STYLES: Record<Severity, { label: string; colour: string; 
 };
 
 export const OBSERVATORY_CONFIG = {
-  title: 'West of England Road Collision Observatory',
+  title: 'England & Wales Collision Map',
   subtitle:
-    'Reported road injury collisions across Bristol, Bath & North East Somerset, South Gloucestershire and North Somerset',
+    'Reported road injury collisions across England and Wales',
   map: {
     centre: [-2.65, 51.47] as [number, number],
     zoom: 9,

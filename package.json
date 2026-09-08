@@ -1,16 +1,16 @@
 {
-  "name": "weca-collision-map",
+  "name": "england-wales-collision-map",
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
   "author": "Adam Reynolds",
-  "homepage": "https://awjreynolds.github.io/weca-collision-map/",
+  "homepage": "https://awjreynolds.github.io/england-wales-collision-map/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/awjreynolds/weca-collision-map.git"
+    "url": "https://github.com/awjreynolds/england-wales-collision-map.git"
   },
   "bugs": {
-    "url": "https://github.com/awjreynolds/weca-collision-map/issues"
+    "url": "https://github.com/awjreynolds/england-wales-collision-map/issues"
   },
   "type": "module",
   "scripts": {

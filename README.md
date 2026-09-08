@@ -1,4 +1,4 @@
-# England & Wales Road Safety Observatory
+# England & Wales Collision Map
 
 A static React/MapLibre application for exploring reported road injury collisions across **England and Wales**. The national view uses a read-only query service for exact summaries, bounded map results, collision details and explicit persistent-location analysis. A saved West of England preset remains available for **Bristol, Bath & North East Somerset, South Gloucestershire and North Somerset**.
 
@@ -58,9 +58,9 @@ The production build is a static `dist/` directory. The public app reads its dat
 
 ## Publish to GitHub Pages
 
-The public build is published at [awjreynolds.github.io/weca-collision-map](https://awjreynolds.github.io/weca-collision-map/). The repository's [Pages workflow](.github/workflows/pages.yml) runs on pushes to `main` and can also be started manually. It installs with `npm ci`, runs lint, typecheck, tests and the production build, then deploys `dist/` through the official GitHub Pages actions.
+The public build is published at [awjreynolds.github.io/england-wales-collision-map](https://awjreynolds.github.io/england-wales-collision-map/). The repository's [Pages workflow](.github/workflows/pages.yml) runs on pushes to `main` and can also be started manually. It installs with `npm ci`, runs lint, typecheck, tests and the production build, then deploys `dist/` through the official GitHub Pages actions.
 
-Vite is configured for the repository subpath `/weca-collision-map/`; when previewing a production build locally, open the `/weca-collision-map/` path served by `npm run preview`. The application resolves its generated data and boundary assets through Vite's `BASE_URL`, so the same build works from the Pages project path. If the Worker is hosted separately, set `VITE_API_BASE_URL` in the Pages build environment to that Worker URL.
+Vite is configured for the repository subpath `/england-wales-collision-map/`; when previewing a production build locally, open the `/england-wales-collision-map/` path served by `npm run preview`. The application resolves its generated data and boundary assets through Vite's `BASE_URL`, so the same build works from the Pages project path. If the Worker is hosted separately, set `VITE_API_BASE_URL` in the Pages build environment to that Worker URL.
 
 ## Terminology
 

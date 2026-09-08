@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   // GitHub Pages publishes this project beneath the repository name.
-  base: '/weca-collision-map/',
+  base: '/england-wales-collision-map/',
   plugins: [react()],
   server: {
     host: 'localhost',
