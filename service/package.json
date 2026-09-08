@@ -1,0 +1,24 @@
+{
+  "name": "weca-national-query-service",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:sql": "tsx scripts/build-import.ts",
+    "wrangler:types": "wrangler types",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.129.1"
+  }
+}

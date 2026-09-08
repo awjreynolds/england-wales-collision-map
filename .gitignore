@@ -5,7 +5,12 @@ coverage/
 *.log
 public/data/raw/
 data/raw/
+data/national/
+data/schools/
 public/data/*.tmp
 public/data/*.partial
+service/.wrangler/
+service/node_modules/
+.dev.vars*
 .DS_Store
 *.tsbuildinfo

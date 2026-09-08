@@ -1,323 +1,264 @@
-import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { AnalysisGroup, AnalysisHarmFilter, AnalysisPayload, BBox, CollisionDetail, DatasetManifest, QueryFilters, SchoolCoverageProvenance, SchoolRecord, SummaryMetrics, ViewPayload } from '../service/contract';
+import { loadAnalysis, loadCollisionDetail, loadManifest, loadSchools, loadSummary, loadView, ApiRequestError, type QueryOptions, queryString } from './app/data';
+import { parseZoomParam, retryableSchoolOffset } from './app/uiState';
 import { MapView } from './components/MapView';
-import { loadObservatoryData, type ObservatoryData } from './app/data';
-import { AUTHORITY_LABELS, OBSERVATORY_CONFIG, SEVERITY_ORDER, SEVERITY_STYLES } from './domain/config';
-import { groupPersistentLocations } from './domain/analysis';
-import { availableAuthorities, availableYears, DEFAULT_FILTERS, filterRecords, summarizeRecords, type DimensionFilter, type FilterState } from './domain/filters';
-import { DATA_QUALITY_METADATA } from './domain/dataQuality';
-import type { CollisionRecord, PersistentLocation, Severity } from './domain/model';
-import { recordsInViewport, summarizeCasualtySeverities, type ViewportBounds } from './domain/viewport';
 import './styles.css';
 
 const numberFormat = new Intl.NumberFormat('en-GB');
-
-const displayNumber = (value: number | null): string => value === null ? '—' : numberFormat.format(value);
-
-const displayDate = (value: string | undefined): string => {
-  if (!value) return 'not recorded';
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium' }).format(date);
+const WEST_OF_ENGLAND = ['E06000022', 'E06000023', 'E06000024', 'E06000025'];
+const SCHOOL_PAGE_SIZE = 200;
+const DEFAULT_FILTERS: QueryFilters = { years: [], authorities: [], severities: [], pedestrian: 'all', cycle: 'all', motorcycle: 'all' };
+const severityLabel = (value: string): string => value[0].toUpperCase() + value.slice(1);
+const format = (value: number | null | undefined): string => value === null || value === undefined ? '—' : numberFormat.format(value);
+const bboxLabel = (bbox: BBox | null): string => bbox ? `${bbox.south.toFixed(2)}° to ${bbox.north.toFixed(2)}° N` : 'national extent';
+const sameBBox = (left: BBox | null, right: BBox): boolean => Boolean(left && Math.abs(left.west - right.west) < 1e-7 && Math.abs(left.south - right.south) < 1e-7 && Math.abs(left.east - right.east) < 1e-7 && Math.abs(left.north - right.north) < 1e-7);
+const copy = {
+  title: 'England & Wales Road Safety Observatory',
+  subtitle: 'A national evidence view for reported injury collisions, persistent locations and school proximity screens.',
 };
 
-const severityDescription = (severity: Severity): string => {
-  if (severity === 'fatal') return 'Fatal';
-  if (severity === 'serious') return 'Serious';
-  if (severity === 'slight') return 'Slight';
-  return 'Unknown';
+type LoadState = { manifest: DatasetManifest | null; error: string | null };
+type SummaryState = { selected: SummaryMetrics | null; viewport: SummaryMetrics | null; datasetVersion: string | null; loading: boolean; stale: boolean; error: string | null };
+
+const parseInitialState = (): { filters: QueryFilters; radius: number; harm: AnalysisHarmFilter; schoolDistance?: 500 | 1000; bbox?: BBox; zoom?: number; schoolId?: string } => {
+  if (typeof window === 'undefined') return { filters: DEFAULT_FILTERS, radius: 100, harm: 'all' };
+  const params = new URLSearchParams(window.location.search);
+  const csv = (key: string) => (params.get(key) ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  const years = csv('years').map(Number).filter((year) => Number.isInteger(year));
+  const severities = csv('severity').filter((value): value is QueryFilters['severities'][number] => ['fatal', 'serious', 'slight', 'unknown'].includes(value));
+  const country = params.get('country');
+  const filters: QueryFilters = { years, authorities: csv('authorities'), severities, ...(country === 'England' || country === 'Wales' ? { country } : {}), pedestrian: (params.get('pedestrian') as QueryFilters['pedestrian']) || 'all', cycle: (params.get('cycle') as QueryFilters['cycle']) || 'all', motorcycle: (params.get('motorcycle') as QueryFilters['motorcycle']) || 'all' };
+  const radius = [50, 100, 200, 500].includes(Number(params.get('radius'))) ? Number(params.get('radius')) : 100;
+  const harm = (['all', 'ksi', 'repeated-ksi', 'slight-only'] as const).includes(params.get('harm') as AnalysisHarmFilter) ? params.get('harm') as AnalysisHarmFilter : 'all';
+  const schoolDistance = params.get('schoolDistance') === '500' ? 500 : params.get('schoolDistance') === '1000' ? 1000 : undefined;
+  const bboxValues = (params.get('bbox') ?? '').split(',').map(Number);
+  const bbox = bboxValues.length === 4 && bboxValues.every(Number.isFinite) && bboxValues[1] >= -90 && bboxValues[3] <= 90 && bboxValues[1] <= bboxValues[3] ? { west: bboxValues[0], south: bboxValues[1], east: bboxValues[2], north: bboxValues[3] } : undefined;
+  const zoom = parseZoomParam(params.get('zoom'));
+  const schoolId = params.get('schoolId')?.trim() || undefined;
+  return { filters, radius, harm, schoolDistance, bbox, zoom, schoolId };
 };
 
-type DataState = { status: 'loading' | 'ready' | 'error'; data: ObservatoryData | null; error: string | null };
-const initialDataState: DataState = { status: 'loading', data: null, error: null };
+const paramsFor = (filters: QueryFilters, bbox?: BBox, zoom?: number, radius?: number, harmFilter?: AnalysisHarmFilter, schoolDistanceMetres?: 500 | 1000, schoolId?: string): QueryOptions => ({ filters, ...(bbox ? { bbox } : {}), ...(zoom === undefined ? {} : { zoom }), ...(radius === undefined ? {} : { radiusMetres: radius }), ...(harmFilter ? { harmFilter } : {}), ...(schoolDistanceMetres ? { schoolDistanceMetres } : {}), ...(schoolId ? { schoolId } : {}) });
+const selectionBBox = (manifest: DatasetManifest, filters: QueryFilters): BBox => {
+  const authorities = manifest.authorities?.filter((authority) => filters.authorities.includes(authority.code) && authority.bbox);
+  const scoped = authorities?.length ? authorities : manifest.authorities?.filter((authority) => filters.country ? authority.country === filters.country && authority.bbox : false);
+  if (!scoped?.length) return manifest.extent;
+  return { west: Math.min(...scoped.map((authority) => authority.bbox!.west)), south: Math.min(...scoped.map((authority) => authority.bbox!.south)), east: Math.max(...scoped.map((authority) => authority.bbox!.east)), north: Math.max(...scoped.map((authority) => authority.bbox!.north)) };
+};
+type AuthorityLabelRecord = Pick<NonNullable<DatasetManifest['authorities']>[number], 'name' | 'code'>;
+const displayAuthorityName = (authority: AuthorityLabelRecord, authorities: AuthorityLabelRecord[]): string => {
+  const normalized = authority.name.trim().toLocaleLowerCase('en-GB');
+  const duplicate = authorities.filter((candidate) => candidate.name.trim().toLocaleLowerCase('en-GB') === normalized).length > 1;
+  return duplicate ? `${authority.name} (${authority.code})` : authority.name;
+};
+const UK_SEARCH_BOUNDS: BBox = { west: -6.5, south: 49.8, east: 2.2, north: 55.9 };
+type PlaceResult = { bbox: BBox; label: string };
+type PhotonFeature = { geometry?: { type?: string; coordinates?: unknown }; properties?: { name?: unknown; city?: unknown; town?: unknown; village?: unknown; postcode?: unknown; countrycode?: unknown; extent?: unknown } };
+const finiteCoordinate = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const bboxContains = (bbox: BBox, longitude: number, latitude: number): boolean => longitude >= bbox.west && longitude <= bbox.east && latitude >= bbox.south && latitude <= bbox.north;
+const placeInEnglandOrWales = (manifest: DatasetManifest | null, longitude: number, latitude: number): boolean => {
+  if (!bboxContains(UK_SEARCH_BOUNDS, longitude, latitude)) return false;
+  const authorityBounds = (manifest?.authorities ?? []).map((authority) => authority.bbox).filter((value): value is BBox => Boolean(value));
+  return authorityBounds.length ? authorityBounds.some((bbox) => bboxContains(bbox, longitude, latitude)) : Boolean(manifest?.extent && bboxContains(manifest.extent, longitude, latitude));
+};
+const extentBBox = (value: unknown): BBox | null => {
+  if (!Array.isArray(value) || value.length !== 4 || !value.every(finiteCoordinate)) return null;
+  const [firstLongitude, firstLatitude, secondLongitude, secondLatitude] = value;
+  return { west: Math.min(firstLongitude, secondLongitude), east: Math.max(firstLongitude, secondLongitude), south: Math.min(firstLatitude, secondLatitude), north: Math.max(firstLatitude, secondLatitude) };
+};
+const placeLabel = (properties: PhotonFeature['properties']): string => [properties?.name, properties?.city ?? properties?.town ?? properties?.village, properties?.postcode].filter((value): value is string => typeof value === 'string' && value.trim() !== '').join(', ');
 
-const useObservatoryData = (): { status: 'loading' | 'ready' | 'error'; data: ObservatoryData | null; error: string | null } => {
-  const [state, setState] = useState<DataState>(initialDataState);
-  useEffect(() => {
-    let active = true;
-    loadObservatoryData().then((data) => {
-      if (active) setState({ status: 'ready', data, error: null });
-    }).catch((error: unknown) => {
-      if (active) setState({ status: 'error', data: null, error: error instanceof Error ? error.message : 'The collision dataset could not be loaded.' });
-    });
-    return () => { active = false; };
-  }, []);
-  return state;
+const StatCard = ({ label, value, note }: { label: string; value: string; note?: string }) => <div className="stat-card"><span className="stat-label">{label}</span><strong className="stat-value">{value}</strong>{note && <span className="stat-detail">{note}</span>}</div>;
+
+const Metrics = ({ metrics, label, updating, stale }: { metrics: SummaryMetrics | null; label: string; updating?: boolean; stale?: boolean }) => <section className="summary-panel national-summary"><div className="section-heading-row"><div><p className="section-kicker">{label}</p><h2>{updating ? 'Updating totals…' : stale ? 'Totals unavailable' : 'Exact reported totals'}</h2></div>{metrics && !stale && <span className="summary-context">{metrics.yearsRepresented.join(' · ') || 'No year selected'}</span>}</div><div className="stats-grid"><StatCard label="Collisions" value={stale ? '—' : format(metrics?.collisions)} note="reported injury events" /><StatCard label="Fatal" value={stale ? '—' : format(metrics?.collisionSeverity.fatal)} note="collision events" /><StatCard label="Serious" value={stale ? '—' : format(metrics?.collisionSeverity.serious)} note="collision events" /><StatCard label="Slight" value={stale ? '—' : format(metrics?.collisionSeverity.slight)} note="collision events" /></div><div className="casualty-strip"><div className="casualty-metric"><span>Casualties</span><strong>{stale ? '—' : format(metrics?.casualties.total.value)}</strong></div><div className="casualty-metric"><span>Fatalities</span><strong>{stale ? '—' : format(metrics?.casualties.fatalities.value)}</strong></div><div className="casualty-metric"><span>Seriously injured</span><strong>{stale ? '—' : format(metrics?.casualties.serious.value)}</strong></div><div className="casualty-metric"><span>Slightly injured</span><strong>{stale ? '—' : format(metrics?.casualties.slight.value)}</strong></div><div className="casualty-metric"><span>KSI collisions</span><strong>{stale ? '—' : format(metrics?.ksiCollisions)}</strong></div></div>{metrics && !stale && !metrics.complete && <p className="inline-note">Some casualty fields are unrecorded; totals sum recorded values and retain unknown counts.</p>}</section>;
+
+const Filters = ({ manifest, filters, onChange, onPreset, onReset }: { manifest: DatasetManifest; filters: QueryFilters; onChange: (next: QueryFilters) => void; onPreset: () => void; onReset: () => void }) => {
+  const toggle = (key: 'years' | 'authorities' | 'severities', value: string | number, checked: boolean) => { const current = filters[key] as Array<string | number>; const next = checked ? [...current, value] : current.filter((item) => item !== value); onChange({ ...filters, [key]: next } as QueryFilters); };
+  return <section className="filters-panel" aria-labelledby="filters-heading"><div className="section-heading-row"><div><p className="section-kicker">Define the selection</p><h2 id="filters-heading">Filters</h2></div><button className="text-button" type="button" onClick={onReset}>Reset</button></div><div className="filter-actions"><button type="button" className="preset-button" onClick={onPreset}>West of England preset</button><button type="button" className="text-button" onClick={() => onChange(DEFAULT_FILTERS)}>England &amp; Wales</button></div><fieldset className="filter-fieldset"><legend>Country</legend><div className="choice-row"><label><input type="radio" name="country" checked={!filters.country} onChange={() => onChange({ ...filters, country: undefined, authorities: [] })} /> England &amp; Wales</label><label><input type="radio" name="country" checked={filters.country === 'England'} onChange={() => onChange({ ...filters, country: 'England', authorities: [] })} /> England</label><label><input type="radio" name="country" checked={filters.country === 'Wales'} onChange={() => onChange({ ...filters, country: 'Wales', authorities: [] })} /> Wales</label></div></fieldset><fieldset className="filter-fieldset"><legend>Calendar year</legend><div className="year-options">{manifest.years.map((year) => <label className="check-option" key={year}><input type="checkbox" checked={filters.years.includes(year)} onChange={(event) => toggle('years', year, event.target.checked)} /><span>{year}</span></label>)}</div><p className="filter-hint">No year selected includes all available years.</p></fieldset><fieldset className="filter-fieldset"><legend>Local authority</legend><div className="authority-options">{(manifest.authorities ?? []).map((authority) => <label className="check-option" key={authority.code}><input type="checkbox" checked={filters.authorities.includes(authority.code)} onChange={(event) => toggle('authorities', authority.code, event.target.checked)} /><span>{displayAuthorityName(authority, manifest.authorities ?? [])}</span></label>)}</div></fieldset><fieldset className="filter-fieldset"><legend>Collision severity</legend><div className="severity-options">{['fatal', 'serious', 'slight', 'unknown'].map((severity) => <label className="severity-option" key={severity}><input type="checkbox" checked={filters.severities.includes(severity as QueryFilters['severities'][number])} onChange={(event) => toggle('severities', severity, event.target.checked)} /><i className={`severity-dot severity-${severity}`} /><span>{severityLabel(severity)}</span></label>)}</div></fieldset><div className="involvement-grid"><label className="select-field"><span>Pedestrian involvement</span><select value={filters.pedestrian} onChange={(event) => onChange({ ...filters, pedestrian: event.target.value as QueryFilters['pedestrian'] })}><option value="all">All records</option><option value="yes">Involved</option><option value="no">Not involved</option><option value="unknown">Not recorded</option></select></label><label className="select-field"><span>Cycle involvement</span><select value={filters.cycle} onChange={(event) => onChange({ ...filters, cycle: event.target.value as QueryFilters['cycle'] })}><option value="all">All records</option><option value="yes">Involved</option><option value="no">Not involved</option><option value="unknown">Not recorded</option></select></label><label className="select-field"><span>Motorcycle involvement</span><select value={filters.motorcycle} onChange={(event) => onChange({ ...filters, motorcycle: event.target.value as QueryFilters['motorcycle'] })}><option value="all">All records</option><option value="yes">Involved</option><option value="no">Not involved</option><option value="unknown">Not recorded</option></select></label></div></section>;
 };
 
-const StatCard = ({ label, value, accent, detail }: { label: string; value: string; accent?: Severity; detail?: string }) => (
-  <div className={`stat-card ${accent ? `stat-${accent}` : ''}`}>
-    <span className="stat-label">{label}</span>
-    <strong className="stat-value">{value}</strong>
-    {detail && <span className="stat-detail">{detail}</span>}
-  </div>
-);
+const PlaceSearch = ({ onSearch, status }: { onSearch: (query: string) => void; status: string | null }) => { const [value, setValue] = useState(''); return <section className="search-panel"><p className="section-kicker">Find a place</p><h2>Town or postcode</h2><form onSubmit={(event) => { event.preventDefault(); if (value.trim()) onSearch(value.trim()); }}><div className="search-row"><input aria-label="Town or postcode" value={value} onChange={(event) => setValue(event.target.value)} placeholder="e.g. Cardiff or BS1" /><button type="submit">Search</button></div></form>{status && <p className="inline-note">{status}</p>}<p className="search-method">Search runs only when submitted via the public <a href="https://photon.komoot.io/" target="_blank" rel="noreferrer">Photon</a> geocoder using OpenStreetMap data.</p></section>; };
 
-const DataQualityNote = ({ data }: { data: ObservatoryData }) => {
-  const title = data.metadata.qualityWarningTitle ?? DATA_QUALITY_METADATA.warning.title;
-  const text = data.metadata.qualityWarning ?? DATA_QUALITY_METADATA.warning.text;
-  const sourceUrl = data.metadata.qualityWarningSource ?? DATA_QUALITY_METADATA.warning.sources[0]?.url;
-  return (
-    <section className="quality-note" aria-labelledby="quality-note-heading">
-      <div className="quality-icon" aria-hidden="true">!</div>
-      <div>
-        <h2 id="quality-note-heading">{title}</h2>
-        <p>{text}</p>
-        {sourceUrl && <p className="source-line">Source note: <a href={sourceUrl} target="_blank" rel="noreferrer">DfT recording-quality note</a></p>}
-      </div>
-    </section>
-  );
+const groupMetric = (metric: { value: number | null; unknownRecords: number }): string => {
+  if (metric.value === null) return metric.unknownRecords ? `Not recorded (${format(metric.unknownRecords)})` : 'Not recorded';
+  return metric.unknownRecords ? `${format(metric.value)} (${format(metric.unknownRecords)} not recorded)` : format(metric.value);
 };
 
-const Summary = ({ records, casualtyCoverage }: { records: CollisionRecord[]; casualtyCoverage?: string }) => {
-  const summary = useMemo(() => summarizeRecords(records), [records]);
-  const incompleteMetrics = [
-    { label: 'Casualties', unknown: summary.casualtiesUnknown },
-    { label: 'Fatalities', unknown: summary.fatalitiesUnknown },
-    { label: 'Seriously injured', unknown: summary.seriousCasualtiesUnknown },
-    { label: 'KSI casualties', unknown: summary.ksiCasualtiesUnknown },
-  ].filter((metric) => metric.unknown > 0);
-  const casualtyAvailable = casualtyCoverage !== 'unavailable' && (
-    [summary.casualties, summary.fatalities, summary.seriousCasualties, summary.ksiCasualties].some((value) => value !== null) || incompleteMetrics.length > 0
-  );
-  const casualtyMetric = (label: string, value: number | null, unknown: number) => (
-    <div className={unknown ? 'casualty-metric incomplete' : 'casualty-metric'}>
-      <span>{label}{unknown ? '*' : ''}</span>
-      <strong>{displayNumber(value)}</strong>
-      {unknown > 0 && <small>{numberFormat.format(unknown)} not recorded</small>}
-    </div>
-  );
-  return (
-    <section className="summary-panel" aria-labelledby="summary-heading">
-      <div className="section-heading-row">
-        <div>
-          <p className="section-kicker">Filtered regional view</p>
-          <h2 id="summary-heading">Current totals</h2>
-        </div>
-        <span className="summary-context">All matching records, independent of viewport</span>
-      </div>
-      <div className="stats-grid">
-        <StatCard label="Collisions" value={displayNumber(summary.collisions)} detail="reported injury collisions" />
-        <StatCard label="Fatal" value={displayNumber(summary.fatalCollisions)} accent="fatal" />
-        <StatCard label="Serious" value={displayNumber(summary.seriousCollisions)} accent="serious" />
-        <StatCard label="Slight" value={displayNumber(summary.slightCollisions)} accent="slight" />
-      </div>
-      {summary.unknownSeverity > 0 && <p className="inline-note">{numberFormat.format(summary.unknownSeverity)} collision{summary.unknownSeverity === 1 ? '' : 's'} have no recognized severity.</p>}
-      {casualtyAvailable && (
-        <div className="casualty-strip" aria-label="Casualty totals">
-          {casualtyMetric('Casualties', summary.casualties, summary.casualtiesUnknown)}
-          {casualtyMetric('Fatalities', summary.fatalities, summary.fatalitiesUnknown)}
-          {casualtyMetric('Seriously injured', summary.seriousCasualties, summary.seriousCasualtiesUnknown)}
-          {casualtyMetric('KSI casualties', summary.ksiCasualties, summary.ksiCasualtiesUnknown)}
-        </div>
-      )}
-      {incompleteMetrics.length > 0 && <p className="inline-note">Totals marked * sum recorded values; {incompleteMetrics.map((metric, index) => <span key={metric.label}>{index > 0 ? '; ' : ''}{metric.label} has {numberFormat.format(metric.unknown)} unrecorded value{metric.unknown === 1 ? '' : 's'}</span>)}.</p>}
-      {casualtyCoverage === 'partial' && incompleteMetrics.length === 0 && <p className="inline-note">Casualty totals are partial and are not a complete count of people affected.</p>}
-    </section>
-  );
-};
-
-const viewportValue = (value: number | null, recordCount: number): string => recordCount === 0 ? '0' : displayNumber(value);
-
-const ViewportSummary = ({ records, matchingCount }: { records: CollisionRecord[]; matchingCount: number }) => {
-  const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 540px)').matches === true);
-  const summary = useMemo(() => summarizeRecords(records), [records]);
-  const casualty = useMemo(() => summarizeCasualtySeverities(records), [records]);
-  const incomplete = records.filter((record) => record.casualtyCount === null || record.fatalities === null || record.seriousCasualties === null || record.casualtyCount < (record.fatalities ?? 0) + (record.seriousCasualties ?? 0)).length;
-  const collisionMetrics = [
-    { label: 'Fatal', value: summary.fatalCollisions, className: 'fatal' },
-    { label: 'Serious', value: summary.seriousCollisions, className: 'serious' },
-    { label: 'Slight', value: summary.slightCollisions, className: 'slight' },
-    { label: 'Unknown', value: summary.unknownSeverity, className: 'unknown' },
-  ];
-  const casualtyMetrics = [
-    { label: 'Fatalities', value: casualty.fatalities, unknown: casualty.fatalitiesUnknown, className: 'fatal' },
-    { label: 'Seriously injured', value: casualty.serious, unknown: casualty.seriousUnknown, className: 'serious' },
-    { label: 'Slightly injured', value: casualty.slight, unknown: casualty.slightUnknown, className: 'slight' },
-  ];
-  return <section className="viewport-panel" aria-labelledby="viewport-summary-heading">
-    <div className="viewport-panel-heading">
-      <div><p className="section-kicker">Current map extent</p><h2 id="viewport-summary-heading">Visible totals</h2></div>
-      <div className="viewport-heading-tools"><span className="viewport-count">{numberFormat.format(records.length)} of {numberFormat.format(matchingCount)} visible<br />{viewportValue(summary.casualties, records.length)} casualties</span><button className="viewport-toggle" type="button" aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}>{collapsed ? 'Show breakdown' : 'Hide breakdown'}</button></div>
-    </div>
-    {!collapsed && <>
-      <div className="viewport-breakdown">
-      <div className="viewport-breakdown-group">
-        <h3>Collision severity <span>events</span></h3>
-        <div className="viewport-metrics">
-          {collisionMetrics.map((metric) => <div className={`viewport-metric metric-${metric.className}`} key={metric.label}><span>{metric.label}</span><strong>{numberFormat.format(metric.value)}</strong></div>)}
-        </div>
-      </div>
-      <div className="viewport-breakdown-group">
-        <h3>Casualty severity <span>{viewportValue(summary.casualties, records.length)} casualties</span></h3>
-        <div className="viewport-metrics">
-          {casualtyMetrics.map((metric) => <div className={`viewport-metric metric-${metric.className}`} key={metric.label}><span>{metric.label}{metric.unknown > 0 ? '*' : ''}</span><strong>{viewportValue(metric.value, records.length)}</strong></div>)}
-        </div>
-      </div>
-      </div>
-      <p className="viewport-note">Updates as you pan, zoom or filter. Casualties are people injured in these collisions.</p>
-      <details className="viewport-method"><summary>About these totals</summary><p>Collision severity counts events. Slightly injured is derived from recorded casualties minus fatalities and serious injuries. {records.length === 0 ? 'No matching records are visible.' : incomplete > 0 ? `${numberFormat.format(incomplete)} matching record${incomplete === 1 ? '' : 's'} lack a complete casualty-severity split.` : 'All three casualty-severity inputs are recorded for these records.'}</p></details>
-    </>}
+const AnalysisGroupDetail = ({ group, onClose }: { group: AnalysisGroup; onClose: () => void }) => {
+  const nearest = group.schoolProximity.nearestSchool;
+  return <section className="analysis-selection" aria-labelledby="analysis-selection-heading">
+    <div className="section-heading-row"><div><p className="section-kicker">Selected persistent location</p><h3 id="analysis-selection-heading">Group inspection</h3></div><button className="text-button" type="button" onClick={onClose}>Close</button></div>
+    <dl className="analysis-detail-grid">
+      <div><dt>Recurrence</dt><dd>{format(group.collisions)} collisions across {group.yearsRepresented.join(' · ')}</dd></div>
+      <div><dt>Collision harm</dt><dd>{format(group.harm.collisionSeverity.fatal)} fatal · {format(group.harm.collisionSeverity.serious)} serious · {format(group.harm.collisionSeverity.slight)} slight · {format(group.harm.ksiCollisions)} KSI collisions</dd></div>
+      <div><dt>Casualty harm</dt><dd>{groupMetric(group.harm.casualties.fatalities)} fatal · {groupMetric(group.harm.casualties.serious)} serious · {groupMetric(group.harm.casualties.slight)} slight</dd></div>
+      <div><dt>Nearest listed school</dt><dd>{nearest ? `${Math.round(nearest.distanceMetres)}m · ${nearest.school.name}` : 'No listed school within 1km'}</dd></div>
+    </dl>
+    <p className="analysis-selection-note">School distance is measured from the group anchor. The whole group may extend beyond the anchor radius, so this is a screening signal for investigation rather than a conclusion about the site or route.</p>
   </section>;
 };
 
-const MultiSelectGroup = ({ label, options, selected, onChange }: { label: string; options: string[]; selected: string[]; onChange: (value: string, checked: boolean) => void }) => (
-  <fieldset className="filter-fieldset">
-    <legend>{label}</legend>
-    <div className="checkbox-grid">
-      {options.map((option) => (
-        <label className="check-option" key={option}>
-          <input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(option, event.target.checked)} />
-          <span>{AUTHORITY_LABELS[option] ?? option}</span>
-        </label>
-      ))}
-    </div>
-  </fieldset>
-);
-
-const SeverityFilter = ({ selected, onChange }: { selected: Severity[]; onChange: (severity: Severity, checked: boolean) => void }) => (
-  <fieldset className="filter-fieldset">
-    <legend>Collision severity</legend>
-    <div className="severity-options">
-      {SEVERITY_ORDER.map((severity) => (
-        <label className="severity-option" key={severity} style={{ '--severity-colour': SEVERITY_STYLES[severity].colour } as CSSProperties}>
-          <input type="checkbox" checked={selected.includes(severity)} onChange={(event) => onChange(severity, event.target.checked)} />
-          <span className="severity-dot" aria-hidden="true" />
-          <span>{severityDescription(severity)}</span>
-        </label>
-      ))}
-    </div>
-  </fieldset>
-);
-
-const InvolvementSelect = ({ label, value, disabled, onChange }: { label: string; value: DimensionFilter; disabled: boolean; onChange: (value: DimensionFilter) => void }) => (
-  <label className="select-field">
-    <span>{label}</span>
-    <select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as DimensionFilter)}>
-      <option value="all">All records</option>
-      <option value="yes">Involved</option>
-      <option value="no">Not involved</option>
-      <option value="unknown">Not recorded</option>
-    </select>
-  </label>
-);
-
-const Filters = ({ records, filters, setFilters, metadata, onReset }: { records: CollisionRecord[]; filters: FilterState; setFilters: Dispatch<SetStateAction<FilterState>>; metadata: ObservatoryData['metadata']; onReset: () => void }) => {
-  const years = availableYears(records);
-  const authorities = availableAuthorities(records);
-  const involvementSupported = metadata.involvementCoverage !== 'unavailable' && records.some((record) => record.pedestrianInvolved !== null || record.cycleInvolved !== null || record.motorcycleInvolved !== null);
-  const toggle = (key: 'years' | 'authorities' | 'severities', value: number | string | Severity, checked: boolean) => setFilters((current) => {
-    const values = current[key] as Array<number | string | Severity>;
-    const next = checked ? [...values, value] : values.filter((candidate) => candidate !== value);
-    return { ...current, [key]: next } as FilterState;
-  });
-  return (
-    <section className="filters-panel" aria-labelledby="filters-heading">
-      <div className="section-heading-row">
-        <div><p className="section-kicker">Explore the evidence</p><h2 id="filters-heading">Filters</h2></div>
-        <button className="text-button" type="button" onClick={onReset}>Reset</button>
-      </div>
-      <p className="filter-hint">No selection includes all values.</p>
-      <fieldset className="filter-fieldset">
-        <legend>Calendar year{filters.years.length ? ` (${filters.years.length} selected)` : ''}</legend>
-        <div className="year-options">
-          {years.map((year) => <label className="check-option" key={year}><input type="checkbox" checked={filters.years.includes(year)} onChange={(event) => toggle('years', year, event.target.checked)} /><span>{year}</span></label>)}
-        </div>
-        {!years.length && <p className="muted">No year values were found in the loaded records.</p>}
-      </fieldset>
-      <MultiSelectGroup label="Local authority" options={authorities} selected={filters.authorities} onChange={(value, checked) => toggle('authorities', value, checked)} />
-      <SeverityFilter selected={filters.severities} onChange={(value, checked) => toggle('severities', value, checked)} />
-      <div className="involvement-grid">
-        <InvolvementSelect label="Pedestrian involvement" value={filters.pedestrian} disabled={!involvementSupported} onChange={(value) => setFilters((current) => ({ ...current, pedestrian: value }))} />
-        <InvolvementSelect label="Cycle involvement" value={filters.cycle} disabled={!involvementSupported} onChange={(value) => setFilters((current) => ({ ...current, cycle: value }))} />
-        <InvolvementSelect label="Motorcycle involvement" value={filters.motorcycle} disabled={!involvementSupported} onChange={(value) => setFilters((current) => ({ ...current, motorcycle: value }))} />
-      </div>
-      {!involvementSupported && <p className="inline-note">Road-user involvement is unavailable in this snapshot, so those filters are disabled.</p>}
-      {involvementSupported && records.some((record) => record.pedestrianInvolved === null || record.cycleInvolved === null || record.motorcycleInvolved === null) && <p className="inline-note">Unknown involvement stays separate from a recorded “No”.</p>}
-    </section>
-  );
+const AnalysisPanel = ({ groups, coverage, provenance, inputRecords, edgeWarning, radius, harm, schoolDistance, analysisScope, selectedGroup, onGroupSelect, onGroupClose, onRun, onRadius, onHarm, onSchoolDistance, running, blocked, error }: { groups: AnalysisGroup[]; coverage: AnalysisPayload['schoolCoverage']; provenance: SchoolCoverageProvenance[]; inputRecords: number | null; edgeWarning: boolean; radius: number; harm: AnalysisHarmFilter; schoolDistance?: 500 | 1000; analysisScope: BBox | null; selectedGroup: AnalysisGroup | null; onGroupSelect: (group: AnalysisGroup) => void; onGroupClose: () => void; onRun: () => void; onRadius: (value: number) => void; onHarm: (value: AnalysisHarmFilter) => void; onSchoolDistance: (value?: 500 | 1000) => void; running: boolean; blocked: boolean; error: string | null }) => {
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => setShowAll(false), [groups]);
+  const visibleGroups = showAll ? groups : groups.slice(0, 8);
+  return <section className="analysis-panel"><div className="section-heading-row"><div><p className="section-kicker">Bounded spatial screen</p><h2>Persistent locations</h2></div>{groups.length > 0 && <span className="result-count">{groups.length}</span>}</div><p className="panel-copy">Run this analysis for the visible map extent. It groups repeated reported collisions around a stable anchor and screens anchors against published school points at 500m and 1km. The map shows up to 200 local school points; analysis searches the full catalogue.</p>{analysisScope && <p className="analysis-scope-note">Saved analysis area: {bboxLabel(analysisScope)}. Panning or zooming changes the live map only; rerun the analysis to update this saved screen.</p>}<label className="range-field"><span>Anchor radius <strong>{radius}m</strong></span><select value={radius} onChange={(event) => onRadius(Number(event.target.value))}><option value="50">50m</option><option value="100">100m</option><option value="200">200m</option><option value="500">500m</option></select></label><div className="analysis-controls"><label><span>Harm class</span><select value={harm} onChange={(event) => onHarm(event.target.value as AnalysisHarmFilter)}><option value="all">All grouped collisions</option><option value="ksi">At least one KSI collision</option><option value="repeated-ksi">Repeated KSI collisions</option><option value="slight-only">Slight-only harm</option></select></label><label><span>School screen</span><select value={schoolDistance ?? ''} onChange={(event) => onSchoolDistance(event.target.value ? Number(event.target.value) as 500 | 1000 : undefined)}><option value="">Show all groups</option><option value="500">Within 500m</option><option value="1000">Within 1km</option></select></label></div>{inputRecords !== null && inputRecords > 10000 && <p className="limit-warning">This view contains {format(inputRecords)} matching records. Narrow the map or filters below 10,000 before analysis.</p>}{error && <p className="limit-warning">{error}</p>}<button className="primary-button" type="button" onClick={onRun} disabled={running || blocked}>{running ? 'Analysing…' : 'Analyse this area'}</button>{edgeWarning && <p className="inline-note">Some groups touch the analysis boundary. Expand the map and rerun before interpreting the coverage.</p>}{groups.length > 0 && <><div className="coverage-grid">{coverage.map((item) => <div key={item.distanceMetres}><span>{item.distanceMetres === 500 ? '500m' : '1km'} school coverage</span><strong>{item.percentage === null ? '—' : `${item.percentage}%`}</strong><small>{item.matchingLocations} of {item.totalLocations} anchors</small></div>)}</div><p className="analysis-method-note">Coverage is calculated from whole groups using each group’s anchor point; the nearest-school distance is measured from that anchor. A group may extend beyond the anchor radius.</p><ol className="analysis-list">{visibleGroups.map((group, index) => <li key={group.id}><button type="button" className={`analysis-location ${selectedGroup?.id === group.id ? 'selected' : ''}`} aria-pressed={selectedGroup?.id === group.id} onClick={() => onGroupSelect(group)}><span className="location-rank">{String(index + 1).padStart(2, '0')}</span><span className="location-copy"><strong>{format(group.collisions)} collisions</strong><span>{group.yearsRepresented.join(' · ')} · {format(group.harm.ksiCollisions)} KSI collision{group.harm.ksiCollisions === 1 ? '' : 's'}</span><small>Harm: {groupMetric(group.harm.casualties.fatalities)} fatal · {groupMetric(group.harm.casualties.serious)} serious · {groupMetric(group.harm.casualties.slight)} slight casualties</small><small>{group.schoolProximity.nearestSchool ? `${Math.round(group.schoolProximity.nearestSchool.distanceMetres)}m to ${group.schoolProximity.nearestSchool.school.name}` : 'No school within 1km'}</small></span><span className="location-arrow" aria-hidden="true">↗</span></button></li>)}</ol>{groups.length > 8 && <button className="text-button analysis-list-toggle" type="button" onClick={() => setShowAll((current) => !current)}>{showAll ? 'Show fewer locations' : `Show all ${format(groups.length)} locations`}</button>}{selectedGroup && <AnalysisGroupDetail group={selectedGroup} onClose={onGroupClose} />}</>}{provenance.length > 0 && <details className="method-disclosure"><summary>School coverage source</summary>{provenance.map((item) => <p key={`${item.country}-${item.dataset}`}>{item.country}: {item.publisher} · {item.totalRows.toLocaleString()} source rows, {item.coordinateRows.toLocaleString()} with coordinates. {item.note}</p>)}</details>}</section>;
 };
 
-const CouncilBreakdown = ({ records }: { records: CollisionRecord[] }) => {
-  const summary = useMemo(() => summarizeRecords(records), [records]);
-  const max = Math.max(...summary.authorities.map((authority) => authority.collisions), 1);
-  return (
-    <section className="breakdown-panel" aria-labelledby="breakdown-heading">
-      <div className="section-heading-row"><div><p className="section-kicker">Filtered records</p><h2 id="breakdown-heading">By local authority</h2></div></div>
-      <div className="authority-list">
-        {summary.authorities.map((authority) => <div className="authority-row" key={authority.authority}>
-          <div className="authority-row-heading"><span>{AUTHORITY_LABELS[authority.authority] ?? authority.authority}</span><strong>{numberFormat.format(authority.collisions)}</strong></div>
-          <div className="bar-track"><span className="bar-fill" style={{ width: `${Math.max(2, (authority.collisions / max) * 100)}%` }} /></div>
-          <span className="authority-detail">{authority.fatalCollisions} fatal · {authority.seriousCollisions} serious · {authority.slightCollisions} slight</span>
-        </div>)}
-      </div>
-    </section>
-  );
-};
-
-const PersistentPanel = ({ locations, radiusMetres, onRadiusChange, selectedId, onSelect }: { locations: PersistentLocation[]; radiusMetres: number; onRadiusChange: (radius: number) => void; selectedId: string | null; onSelect: (location: PersistentLocation) => void }) => (
-  <section className="persistent-panel" aria-labelledby="persistent-heading">
-    <div className="section-heading-row"><div><p className="section-kicker">Spatial concentration</p><h2 id="persistent-heading">Persistent locations</h2></div><span className="result-count">{locations.length}</span></div>
-    <p className="panel-copy">A persistent location has at least {OBSERVATORY_CONFIG.grouping.minCollisions} collisions across at least {OBSERVATORY_CONFIG.grouping.minYears} distinct calendar years in the active selection. The purple overlay groups these same collision records; it adds no collisions, and grouping is calculated from the filtered regional selection independently of the current viewport. It shows repeated frequency, not exposure-adjusted risk or an official site assessment.</p>
-    <details className="method-disclosure"><summary>How the grouping works</summary><p>Selected collisions are sorted by stable collision ID. The first unassigned collision anchors a group, then still-unassigned collisions within the radius of that anchor join it. This deterministic anchored method avoids chain-merging distant points; a group's overall diameter can reach twice the radius.</p></details>
-    <label className="range-field"><span>Anchor radius <strong>{radiusMetres}m</strong></span><input type="range" min="50" max={OBSERVATORY_CONFIG.grouping.maxRadiusMetres} step="10" value={radiusMetres} onChange={(event) => onRadiusChange(Number(event.target.value))} /></label>
-    {locations.length ? <ol className="location-list">{locations.slice(0, 8).map((location, index) => <li key={location.id}><button type="button" className={`location-item ${selectedId === location.id ? 'selected' : ''}`} onClick={() => onSelect(location)}><span className="location-rank">{String(index + 1).padStart(2, '0')}</span><span className="location-copy"><strong>{location.collisions} collisions</strong><span>{location.years.join(' · ')} calendar years</span><small>{location.fatalCollisions} fatal · {location.seriousCollisions} serious · {location.slightCollisions} slight</small></span><span className="location-arrow" aria-hidden="true">↗</span></button></li>)}</ol> : <div className="empty-panel"><strong>No persistent locations in this selection</strong><span>Try more years or clear a filter. A single calendar year cannot meet the persistence threshold.</span></div>}
-  </section>
-);
-
-const ProvenancePanel = ({ data }: { data: ObservatoryData }) => {
-  const metadata = data.metadata;
-  const processing = metadata.processingSteps?.length ? metadata.processingSteps : ['Normalize source collision records to the internal point model', 'Validate coordinates and retain only the four study-area authorities', 'Calculate bounded spatial concentrations from the active selection'];
-  const boundarySource = data.boundaryProvenance?.source;
-  return <details className="provenance-panel">
-    <summary>Data provenance and limitations</summary>
-    <div className="provenance-content">
-      <dl className="provenance-list">
-        <div><dt>Upstream dataset</dt><dd>{metadata.upstreamDataset ?? metadata.source ?? 'DfT STATS19 reported road collision data'}</dd></div>
-        <div><dt>Included years</dt><dd>{metadata.includedYears?.join(', ') || 'not recorded'}</dd></div>
-        <div><dt>Latest available year</dt><dd>{metadata.latestYear ?? 'not recorded'}</dd></div>
-        <div><dt>Generated</dt><dd>{displayDate(metadata.generatedAt)}</dd></div>
-        <div><dt>Retrieved</dt><dd>{displayDate(metadata.retrievedAt)}</dd></div>
-        <div><dt>Licence</dt><dd>{metadata.licence ?? 'not recorded'}{metadata.licenceUrl && <> · <a href={metadata.licenceUrl} target="_blank" rel="noreferrer">source</a></>}</dd></div>
-        <div><dt>Records accepted</dt><dd>{numberFormat.format(data.records.length)}{data.invalidCount ? ` · ${numberFormat.format(data.invalidCount)} invalid point${data.invalidCount === 1 ? '' : 's'} excluded` : ''}</dd></div>
-        {boundarySource && <div><dt>Regional outline</dt><dd>{boundarySource.dataset ?? boundarySource.publisher ?? 'ONS local-authority boundary product'}{boundarySource.datasetUrl && <> · <a href={boundarySource.datasetUrl} target="_blank" rel="noreferrer">dataset</a></>}{boundarySource.attribution && <><br />{boundarySource.attribution}</>}</dd></div>}
-      </dl>
-      <h3>Processing disclosed</h3>
-      <ul>{processing.map((step) => <li key={step}>{step}</li>)}</ul>
-      {metadata.limitations?.length ? <><h3>Known limitations</h3><ul>{metadata.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul></> : null}
-      <p className="provenance-source">{metadata.sourceUrl ? <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">Open source documentation</a> : 'Source documentation is recorded in the repository README and generated manifest.'}</p>
-    </div>
-  </details>;
-};
-
-const LoadingState = () => <main className="state-page"><div className="state-card"><span className="loading-spinner" aria-hidden="true" /><p className="section-kicker">Loading local snapshot</p><h1>Preparing the observatory</h1><p>Reading the generated collision GeoJSON and manifest.</p></div></main>;
-
-const ErrorState = ({ message }: { message: string }) => <main className="state-page"><div className="state-card error-state"><div className="error-mark" aria-hidden="true">!</div><p className="section-kicker">Data unavailable</p><h1>Could not load the collision snapshot</h1><p>{message}</p><p className="muted">Run <code>npm run data:refresh</code> after installing dependencies, then reload the local app.</p></div></main>;
+const DetailPanel = ({ detail, loading, onClose }: { detail: CollisionDetail | null; loading: boolean; onClose: () => void }) => !detail && !loading ? null : <section className="detail-panel"><div className="section-heading-row"><div><p className="section-kicker">Selected collision</p><h2>{loading ? 'Loading detail…' : detail?.roadName ?? 'Reported collision'}</h2></div><button className="text-button" type="button" onClick={onClose}>Close</button></div>{detail && <><div className="detail-grid"><span>Date<strong>{detail.date ?? detail.year ?? 'Not recorded'}</strong></span><span>Severity<strong>{severityLabel(detail.severity)}</strong></span><span>Authority<strong>{detail.authorityName ?? detail.authorityCode ?? 'Not recorded'}</strong></span><span>Casualties<strong>{format(detail.casualtyCount)}</strong></span><span>Fatalities<strong>{format(detail.fatalities)}</strong></span><span>Seriously injured<strong>{format(detail.seriousCasualties)}</strong></span></div><details className="method-disclosure"><summary>Linked casualty and vehicle evidence</summary><pre className="evidence-json">{JSON.stringify(detail.evidence, null, 2)}</pre></details></>}</section>;
 
 export const App = () => {
-  const state = useObservatoryData();
-  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
-  const [radiusMetres, setRadiusMetres] = useState<number>(OBSERVATORY_CONFIG.grouping.defaultRadiusMetres);
-  const [selectedLocation, setSelectedLocation] = useState<PersistentLocation | null>(null);
-  const [showPersistentLocations, setShowPersistentLocations] = useState(false);
-  const [resetViewSignal, setResetViewSignal] = useState(0);
-  const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
-  const records = useMemo(() => state.data?.records ?? [], [state.data]);
-  const filteredRecords = useMemo(() => filterRecords(records, filters), [records, filters]);
-  const viewportRecords = useMemo(() => viewportBounds ? recordsInViewport(filteredRecords, viewportBounds) : null, [filteredRecords, viewportBounds]);
-  const locations = useMemo(() => groupPersistentLocations(filteredRecords, radiusMetres, OBSERVATORY_CONFIG.grouping.minCollisions, OBSERVATORY_CONFIG.grouping.minYears), [filteredRecords, radiusMetres]);
-  const resetFilters = () => { setFilters(DEFAULT_FILTERS); setSelectedLocation(null); };
-  const resetMapView = () => { setSelectedLocation(null); setResetViewSignal((value) => value + 1); };
-  const focusLocation = (location: PersistentLocation) => { setSelectedLocation(location); setShowPersistentLocations(true); };
+  const initial = useMemo(parseInitialState, []);
+  const [loadState, setLoadState] = useState<LoadState>({ manifest: null, error: null });
+  const [filters, setFilters] = useState<QueryFilters>(initial.filters);
+  const [bbox, setBBox] = useState<BBox | null>(null);
+  const [zoom, setZoom] = useState(5);
+  const [radius, setRadius] = useState(initial.radius);
+  const [harm, setHarm] = useState<AnalysisHarmFilter>(initial.harm);
+  const [schoolDistance, setSchoolDistance] = useState<500 | 1000 | undefined>(initial.schoolDistance);
+  const [view, setView] = useState<ViewPayload | null>(null);
+  const [summary, setSummary] = useState<SummaryState>({ selected: null, viewport: null, datasetVersion: null, loading: false, stale: true, error: null });
+  const [analysis, setAnalysis] = useState<{ groups: AnalysisGroup[]; coverage: AnalysisPayload['schoolCoverage']; provenance: SchoolCoverageProvenance[]; inputRecords: number | null; edgeWarning: boolean; error: string | null }>({ groups: [], coverage: [], provenance: [], inputRecords: null, edgeWarning: false, error: null });
+  const [analysisRequest, setAnalysisRequest] = useState<QueryOptions | null>(null);
+  const [analysisScope, setAnalysisScope] = useState<BBox | null>(null);
+  const [analysisRunning, setAnalysisRunning] = useState(false);
+  const [schools, setSchools] = useState<SchoolRecord[]>([]);
+  const [schoolQuery, setSchoolQuery] = useState('');
+  const [schoolSearch, setSchoolSearch] = useState('');
+  const [schoolOffset, setSchoolOffset] = useState(0);
+  const [schoolRefresh, setSchoolRefresh] = useState(0);
+  const [schoolLoading, setSchoolLoading] = useState(false);
+  const [schoolError, setSchoolError] = useState<string | null>(null);
+  const [schoolHasMore, setSchoolHasMore] = useState(false);
+  const [showAllSchools, setShowAllSchools] = useState(false);
+  const [selectedSchoolId, setSelectedSchoolId] = useState<string | undefined>();
+  const [selectedCollisionId, setSelectedCollisionId] = useState<string | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<[number, number] | null>(null);
+  const [selectedAnalysisGroup, setSelectedAnalysisGroup] = useState<AnalysisGroup | null>(null);
+  const [detail, setDetail] = useState<CollisionDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [focusBBox, setFocusBBox] = useState<BBox | null>(null);
+  const [resetSignal, setResetSignal] = useState(0);
+  const [placeStatus, setPlaceStatus] = useState<string | null>(null);
+  const requestSequence = useRef(0);
+  const analysisSequence = useRef(0);
+  const detailSequence = useRef(0);
+  const detailController = useRef<AbortController | null>(null);
+  const placeSequence = useRef(0);
+  const placeController = useRef<AbortController | null>(null);
+  const schoolSequence = useRef(0);
+  const schoolFailedOffset = useRef<number | null>(null);
+  const placeCache = useRef(new Map<string, PlaceResult>());
+  const placeLastRequestAt = useRef(0);
 
-  if (state.status === 'loading') return <LoadingState />;
-  if (state.status === 'error' || !state.data) return <ErrorState message={state.error ?? 'The collision dataset could not be loaded.'} />;
-  const data = state.data;
-  const latestYear = data.metadata.latestYear ?? availableYears(records)[0];
-  const sourceLabel = data.metadata.source ?? data.metadata.upstreamDataset ?? 'DfT STATS19';
-  return <div className="app-shell">
-    <header className="app-header"><div className="header-inner"><div className="brand-mark" aria-hidden="true"><span>WE</span><i /></div><div><p className="eyebrow">West of England · Road safety evidence</p><h1>{OBSERVATORY_CONFIG.title}</h1><p className="subtitle">{OBSERVATORY_CONFIG.subtitle}</p></div><div className="header-status"><span className="status-dot" aria-hidden="true" />Local snapshot<br /><strong>{latestYear ? `through ${latestYear}` : sourceLabel}</strong><nav className="header-links" aria-label="Project links"><a href="https://awjreynolds.github.io/">All projects</a><a href="https://github.com/awjreynolds/weca-collision-map">Source</a></nav></div></div></header>
-    <main className="workspace">
-      <section className="map-column" aria-label="Regional collision map"><div className="map-toolbar"><div><span className="map-toolbar-label">Map view</span><strong>{numberFormat.format(filteredRecords.length)} matching collision{filteredRecords.length === 1 ? '' : 's'}</strong></div><div className="map-toolbar-actions"><label className="map-toggle"><input type="checkbox" checked={showPersistentLocations} onChange={(event) => setShowPersistentLocations(event.target.checked)} /><span>Persistent locations</span></label><button className="map-reset" type="button" onClick={resetMapView}>Reset to region</button></div></div><div className="map-frame"><MapView records={filteredRecords} regionRecords={records} locations={locations} boundaries={data.boundaries} resetViewSignal={resetViewSignal} focusLocation={selectedLocation} showPersistentLocations={showPersistentLocations} onLocationSelect={(location) => { setSelectedLocation(location); setShowPersistentLocations(true); }} onViewportBoundsChange={(nextBounds) => setViewportBounds((current) => current && current.west === nextBounds.west && current.east === nextBounds.east && current.south === nextBounds.south && current.north === nextBounds.north ? current : nextBounds)} />{viewportRecords ? <ViewportSummary records={viewportRecords} matchingCount={filteredRecords.length} /> : <div className="viewport-panel viewport-loading"><span className="section-kicker">Current map extent</span><strong>Reading visible records…</strong></div>}<div className="map-legend" aria-label="Severity legend"><span>Severity</span>{SEVERITY_ORDER.map((severity) => <span key={severity}><i style={{ backgroundColor: SEVERITY_STYLES[severity].colour }} />{severityDescription(severity)}</span>)}<span><i className="legend-cluster" />Cluster</span>{showPersistentLocations && <span><i className="legend-hotspot" />Persistent location</span>}</div>{filteredRecords.length === 0 && <div className="map-empty"><strong>No records match these filters</strong><span>Clear or broaden a filter to restore the map.</span></div>}</div></section>
-      <aside className="sidebar"><div className="sidebar-scroll"><DataQualityNote data={data} /><Summary records={filteredRecords} casualtyCoverage={data.metadata.casualtyCoverage} /><Filters records={records} filters={filters} setFilters={setFilters} metadata={data.metadata} onReset={resetFilters} /><CouncilBreakdown records={filteredRecords} /><PersistentPanel locations={locations} radiusMetres={radiusMetres} onRadiusChange={(value) => { setRadiusMetres(value); setSelectedLocation(null); }} selectedId={selectedLocation?.id ?? null} onSelect={focusLocation} /><ProvenancePanel data={data} /><p className="footer-note">Reported STATS19 injury collisions are a record of reported harm, not every incident on the road network. {sourceLabel} · {data.sourcePath}</p></div></aside>
-    </main>
-  </div>;
+  useEffect(() => { const controller = new AbortController(); loadManifest(controller.signal).then((response) => { const initialBBox = initial.bbox ?? selectionBBox(response.data, initial.filters); setLoadState({ manifest: response.data, error: null }); setBBox(initialBBox); setFocusBBox(initialBBox); setZoom(initial.zoom ?? 5); setSelectedSchoolId(initial.schoolId); }).catch((error: unknown) => { if ((error as Error).name !== 'AbortError') setLoadState({ manifest: null, error: error instanceof Error ? error.message : 'The national manifest could not be loaded.' }); }); return () => controller.abort(); }, [initial]);
+  const manifest = loadState.manifest;
+  const activeBBox = bbox ?? manifest?.extent ?? null;
+  const requestOptions = useMemo(() => activeBBox ? paramsFor(filters, activeBBox, zoom, radius, harm, schoolDistance, selectedSchoolId) : null, [activeBBox, filters, harm, radius, schoolDistance, selectedSchoolId, zoom]);
+  useEffect(() => {
+    if (!manifest || !requestOptions) return undefined;
+    const controller = new AbortController(); const sequence = ++requestSequence.current; setSummary((current) => ({ ...current, loading: true, stale: true, error: null }));
+    const selectedOptions = paramsFor(filters, undefined, undefined, radius, harm, schoolDistance, selectedSchoolId);
+    Promise.all([loadView(requestOptions, controller.signal), loadSummary(selectedOptions, controller.signal), loadSummary(requestOptions, controller.signal)]).then(([viewResponse, selectedResponse, viewportResponse]) => {
+      if (sequence !== requestSequence.current) return;
+      if (viewResponse.datasetVersion !== manifest.datasetVersion || selectedResponse.datasetVersion !== manifest.datasetVersion || viewportResponse.datasetVersion !== manifest.datasetVersion) {
+        setSummary((current) => ({ ...current, loading: false, stale: true, error: 'The dataset changed while this view was loading. Reload the page to synchronise the map.' }));
+        return;
+      }
+      setView(viewResponse.data); setSummary({ selected: selectedResponse.data.metrics, viewport: viewportResponse.data.metrics, datasetVersion: viewResponse.datasetVersion, loading: false, stale: false, error: null });
+    }).catch((error: unknown) => { if (sequence === requestSequence.current && (error as Error).name !== 'AbortError') setSummary((current) => ({ ...current, loading: false, stale: true, error: error instanceof Error ? error.message : 'The national view could not be loaded.' })); });
+    return () => controller.abort();
+  }, [manifest, requestOptions, filters, radius, harm, schoolDistance, selectedSchoolId]);
+  useEffect(() => { if (!manifest || !analysisRequest) return undefined; const controller = new AbortController(); const sequence = ++analysisSequence.current; setAnalysisRunning(true); loadAnalysis(analysisRequest, controller.signal).then((response) => { if (sequence !== analysisSequence.current) return; if (response.datasetVersion !== manifest.datasetVersion) { setAnalysis((current) => ({ ...current, error: 'The dataset changed while this analysis was loading. Rerun the analysis after reloading the page.' })); setAnalysisRunning(false); return; } setAnalysis({ groups: response.data.groups, coverage: response.data.schoolCoverage, provenance: response.data.schoolCoverageProvenance ?? [], inputRecords: response.data.inputRecords, edgeWarning: response.data.edgeWarning, error: null }); setAnalysisRunning(false); }).catch((error: unknown) => { if (sequence !== analysisSequence.current || (error as Error).name === 'AbortError') return; setAnalysis((current) => ({ ...current, error: error instanceof ApiRequestError && error.code === 'analysis_limit_exceeded' ? 'Narrow the analysis area or filters below 10,000 matching records.' : error instanceof Error ? error.message : 'Analysis could not be completed.' })); setAnalysisRunning(false); }); return () => controller.abort(); }, [analysisRequest, manifest]);
+  useEffect(() => { analysisSequence.current += 1; setAnalysisRequest(null); setAnalysisScope(null); setAnalysisRunning(false); setSelectedAnalysisGroup(null); setAnalysis({ groups: [], coverage: [], provenance: [], inputRecords: null, edgeWarning: false, error: null }); }, [filters, harm, radius, schoolDistance, selectedSchoolId]);
+  useEffect(() => { if (!activeBBox || !manifest) return; const params = queryString(paramsFor(filters, activeBBox, zoom, radius, harm, schoolDistance, selectedSchoolId)); window.history.replaceState(null, '', `${window.location.pathname}?${params}`); }, [activeBBox, filters, harm, manifest, radius, schoolDistance, selectedSchoolId, zoom]);
+  useEffect(() => {
+    if (!activeBBox || !manifest) return undefined;
+    const controller = new AbortController();
+    const sequence = ++schoolSequence.current;
+    const requestedOffset = schoolSearch ? schoolOffset : 0;
+    const offset = schoolSearch ? retryableSchoolOffset(requestedOffset, schoolFailedOffset.current) : requestedOffset;
+    if (offset !== requestedOffset) setSchoolOffset(offset);
+    const options = schoolSearch ? { ...paramsFor(filters, undefined, undefined, undefined, undefined, undefined, undefined), query: schoolSearch, limit: SCHOOL_PAGE_SIZE, offset } : { ...paramsFor(filters, activeBBox, undefined, undefined, undefined, undefined, undefined), limit: SCHOOL_PAGE_SIZE };
+    setSchoolLoading(true); setSchoolError(null);
+    loadSchools(options, controller.signal).then((response) => {
+      if (sequence !== schoolSequence.current) return;
+      if (response.datasetVersion !== manifest.datasetVersion) { setSchools([]); setSchoolHasMore(false); setSchoolError('The school catalogue changed while loading. Reload the page to synchronise it.'); setSchoolLoading(false); return; }
+      const incoming = response.data.schools;
+      schoolFailedOffset.current = null;
+      setSchools((current) => {
+        if (!schoolSearch || offset === 0) return incoming;
+        const seen = new Set(current.map((school) => school.id));
+        return [...current, ...incoming.filter((school) => !seen.has(school.id))];
+      });
+      setSchoolHasMore(Boolean(schoolSearch) && incoming.length === SCHOOL_PAGE_SIZE);
+      setSchoolLoading(false);
+    }).catch((error: unknown) => {
+      if (sequence !== schoolSequence.current || (error as Error).name === 'AbortError') return;
+      schoolFailedOffset.current = schoolSearch ? offset : null;
+      setSchoolError(error instanceof Error ? error.message : 'The school catalogue could not be loaded.'); setSchoolLoading(false);
+    });
+    return () => controller.abort();
+  }, [activeBBox, filters, manifest, schoolOffset, schoolRefresh, schoolSearch]);
+
+  const handleCollision = (id: string, point: [number, number]) => { detailController.current?.abort(); const sequence = ++detailSequence.current; const controller = new AbortController(); detailController.current = controller; setSelectedAnalysisGroup(null); setSelectedCollisionId(id); setSelectedPoint(point); setDetail(null); setDetailLoading(true); loadCollisionDetail(id, controller.signal).then((response) => { if (sequence === detailSequence.current) setDetail(response.data); }).catch(() => undefined).finally(() => { if (sequence === detailSequence.current) setDetailLoading(false); }); };
+  const handleAnalysisGroup = (group: AnalysisGroup) => { detailController.current?.abort(); detailSequence.current += 1; setDetailLoading(false); setDetail(null); setSelectedCollisionId(null); setSelectedPoint(null); setSelectedAnalysisGroup(group); const span = Math.max(0.025, (radius / 111_000) * 3); setFocusBBox({ west: group.anchor.longitude - span, east: group.anchor.longitude + span, south: group.anchor.latitude - span, north: group.anchor.latitude + span }); };
+  const handlePlace = async (query: string) => {
+    placeController.current?.abort();
+    const sequence = ++placeSequence.current;
+    const controller = new AbortController();
+    placeController.current = controller;
+    const key = query.trim().toLocaleLowerCase('en-GB');
+    if (!key) return;
+    const cached = placeCache.current.get(key);
+    if (cached) {
+      setBBox(cached.bbox); setFocusBBox(cached.bbox); setPlaceStatus(`Map moved to ${cached.label || query}.`); return;
+    }
+    const waitMs = Math.max(0, 1_000 - (Date.now() - placeLastRequestAt.current));
+    setPlaceStatus(waitMs ? 'Waiting briefly before searching…' : 'Searching…');
+    if (waitMs) await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+    if (sequence !== placeSequence.current) return;
+    placeLastRequestAt.current = Date.now();
+    try {
+      const photonUrl = new URL('https://photon.komoot.io/api/');
+      photonUrl.searchParams.set('q', query);
+      photonUrl.searchParams.set('limit', '8');
+      photonUrl.searchParams.set('lang', 'en');
+      const photonResponse = await fetch(photonUrl, { signal: controller.signal, headers: { Accept: 'application/geo+json, application/json' } });
+      const photonPayload = photonResponse.ok ? await photonResponse.json() as { features?: PhotonFeature[] } : { features: [] };
+      const photonMatch = (photonPayload.features ?? []).find((feature) => {
+        const coordinates = feature.geometry?.coordinates;
+        return feature.geometry?.type === 'Point' && Array.isArray(coordinates) && finiteCoordinate(coordinates[0]) && finiteCoordinate(coordinates[1]) && String(feature.properties?.countrycode ?? '').toLocaleLowerCase() === 'gb' && placeInEnglandOrWales(manifest, coordinates[0], coordinates[1]);
+      });
+      let match: PlaceResult | null = null;
+      if (photonMatch) {
+        const coordinates = photonMatch.geometry?.coordinates as [number, number];
+        const label = placeLabel(photonMatch.properties) || query;
+        const extent = extentBBox(photonMatch.properties?.extent);
+        match = { label, bbox: extent && placeInEnglandOrWales(manifest, (extent.west + extent.east) / 2, (extent.south + extent.north) / 2) ? extent : { west: coordinates[0] - .08, east: coordinates[0] + .08, south: coordinates[1] - .05, north: coordinates[1] + .05 } };
+      }
+      if (!match && /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(query)) {
+        const postcodeResponse = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(query.replace(/\s+/g, ''))}`, { signal: controller.signal, headers: { Accept: 'application/json' } });
+        if (postcodeResponse.ok) {
+          const postcodePayload = await postcodeResponse.json() as { result?: { latitude?: unknown; longitude?: unknown } };
+          const latitude = postcodePayload.result?.latitude;
+          const longitude = postcodePayload.result?.longitude;
+          if (finiteCoordinate(latitude) && finiteCoordinate(longitude) && placeInEnglandOrWales(manifest, longitude, latitude)) match = { label: query.toUpperCase(), bbox: { west: longitude - .03, east: longitude + .03, south: latitude - .02, north: latitude + .02 } };
+        }
+      }
+      if (sequence !== placeSequence.current) return;
+      if (!match) { setPlaceStatus('No place found in England or Wales.'); return; }
+      placeCache.current.set(key, match); setBBox(match.bbox); setFocusBBox(match.bbox); setPlaceStatus(`Map moved to ${match.label}.`);
+    } catch (error) {
+      if ((error as Error).name !== 'AbortError' && sequence === placeSequence.current) setPlaceStatus('Place search is unavailable right now.');
+    }
+  };
+  const resetSchoolResults = () => { schoolFailedOffset.current = null; setSchoolOffset(0); setSchoolRefresh((value) => value + 1); setSchools([]); setSchoolHasMore(false); setShowAllSchools(false); setSchoolError(null); };
+  const handleFiltersChange = (next: QueryFilters) => { const moved = next.country !== filters.country || next.authorities.join(',') !== filters.authorities.join(','); setFilters(next); if (moved) resetSchoolResults(); if (moved && manifest) { const nextBBox = selectionBBox(manifest, next); setBBox(nextBBox); setFocusBBox(nextBBox); } };
+  if (loadState.error) return <main className="state-page"><div className="state-card error-state"><h1>England &amp; Wales Observatory</h1><p>{loadState.error}</p><p>Check the API deployment and reload.</p></div></main>;
+  if (!manifest) return <main className="state-page"><div className="state-card"><span className="loading-spinner" /><p className="section-kicker">National evidence view</p><h1>Loading the observatory</h1><p>Reading the current dataset manifest.</p></div></main>;
+  const matchingCount = summary.stale ? null : view?.recordCount ?? summary.viewport?.collisions ?? null;
+  const blocked = (summary.viewport?.collisions ?? 0) > 10000;
+  return <div className="app-shell"><header className="app-header"><div className="header-inner"><div className="brand-mark" aria-hidden="true"><span>EW</span><i /></div><div><p className="eyebrow">National road safety evidence</p><h1>{copy.title}</h1><p className="subtitle">{copy.subtitle}</p></div><div className="header-status"><span className="status-dot" aria-hidden="true" />{summary.loading ? 'Updating' : 'Current dataset'}<br /><strong>{manifest.years.at(-1) ?? 'Latest available year'}</strong><nav className="header-links" aria-label="Project links"><a href="https://awjreynolds.github.io/">All projects</a><a href="https://github.com/awjreynolds/weca-collision-map">Source</a><a href="#method">Method</a></nav></div></div></header><main className="workspace"><section className="map-column" aria-label="England and Wales collision map"><div className="map-toolbar"><div><span className="map-toolbar-label">{bboxLabel(activeBBox)}</span><strong>{matchingCount === null ? 'Updating…' : `${format(matchingCount)} matching collisions`}</strong>{view?.mode === 'aggregates' && !summary.stale && <small className="aggregate-note">Aggregated cells · click a cell to narrow</small>}</div><div className="map-toolbar-actions"><button className="map-reset" type="button" onClick={() => { setBBox(manifest.extent); setFocusBBox(manifest.extent); setResetSignal((value) => value + 1); }}>National view</button></div></div><div className="map-frame"><MapView view={view} manifest={manifest} initialBBox={initial.bbox ?? null} initialZoom={initial.zoom ?? 5} schools={schools} analysisGroups={analysis.groups} resetSignal={resetSignal} focusBBox={focusBBox} selectedCollisionId={selectedCollisionId} selectedPoint={selectedPoint} selectedAnalysisGroup={selectedAnalysisGroup} detail={detail} onPopupClose={() => { detailController.current?.abort(); detailSequence.current += 1; setDetailLoading(false); setDetail(null); setSelectedCollisionId(null); setSelectedPoint(null); setSelectedAnalysisGroup(null); }} onBoundsChange={(next, nextZoom) => { setBBox((current) => sameBBox(current, next) ? current : next); setZoom((current) => Math.abs(current - nextZoom) < 0.01 ? current : nextZoom); }} onAggregateClick={(next) => { setBBox(next); setFocusBBox(next); }} onCollisionClick={handleCollision} onAnalysisGroupClick={handleAnalysisGroup} onSchoolClick={(school) => { setSchoolQuery(school.name); setSelectedSchoolId(school.id); }} />{summary.stale && <div className="map-stale-banner">{summary.error ? `Previous map result shown · ${summary.error}` : 'Updating map result…'}</div>}<div className="map-legend"><span>Map key</span><span><i className="legend-cluster" />Aggregate cell</span><span><i className="legend-fatal" />Fatal</span><span><i className="legend-serious" />Serious</span><span><i className="legend-slight" />Slight</span><span><i className="legend-school" />School</span></div></div></section><aside className="sidebar"><div className="sidebar-scroll"><section className="quality-note"><div className="quality-icon">i</div><div><h2>Read this map as evidence</h2><p>Reported STATS19 injury collisions record reported harm, not every incident. The school screen informs Safe System investigation; it does not infer routes, attendance, exposure or future KSI probability.</p>{manifest.qualityNotices.slice(0, 2).map((notice) => <p key={notice.id}><strong>{notice.title}:</strong> {notice.text}</p>)}</div></section><Metrics metrics={summary.selected} label="Selected national scope" updating={summary.loading} stale={summary.stale} /><Metrics metrics={summary.viewport} label="Current map extent" updating={summary.loading} stale={summary.stale} />{summary.error && <p className="limit-warning">Current totals could not be refreshed: {summary.error}</p>}<PlaceSearch onSearch={handlePlace} status={placeStatus} /><Filters manifest={manifest} filters={filters} onChange={handleFiltersChange} onPreset={() => handleFiltersChange({ ...filters, country: 'England', authorities: WEST_OF_ENGLAND })} onReset={() => { handleFiltersChange(DEFAULT_FILTERS); setSelectedSchoolId(undefined); setSchoolQuery(''); setSchoolSearch(''); setHarm('all'); setSchoolDistance(undefined); setSelectedAnalysisGroup(null); }} /><section className="search-panel school-search"><p className="section-kicker">School catalogue</p><h2>School proximity screen</h2><form onSubmit={(event) => { event.preventDefault(); const nextQuery = schoolQuery.trim(); setSchoolSearch(nextQuery); setSchoolOffset(0); setSchoolRefresh((value) => value + 1); setSchoolError(null); setSchoolHasMore(false); setSchools([]); setShowAllSchools(false); setSelectedSchoolId(undefined); }}><div className="search-row"><input aria-label="School name" value={schoolQuery} onChange={(event) => setSchoolQuery(event.target.value)} placeholder="Search a school name" /><button type="submit">Search</button></div></form>{schoolLoading && <p className="inline-note" aria-live="polite">Loading school matches…</p>}{schoolError && <p className="limit-warning" role="alert">{schoolError}</p>}{selectedSchoolId && <p className="inline-note">Selected school filter active. Clear the search and select a result to remove it.</p>}{(showAllSchools ? schools : schools.slice(0, 6)).map((school) => <button className={`school-result ${selectedSchoolId === school.id ? 'selected' : ''}`} key={school.id} type="button" onClick={() => { setSelectedSchoolId(school.id); setSchoolQuery(school.name); setFocusBBox({ west: school.longitude - .03, east: school.longitude + .03, south: school.latitude - .02, north: school.latitude + .02 }); setBBox({ west: school.longitude - .03, east: school.longitude + .03, south: school.latitude - .02, north: school.latitude + .02 }); }}>{school.name}<small>{school.country} · {school.phase ?? 'phase not recorded'}</small></button>)}{schools.length > 6 && <button className="text-button school-results-toggle" type="button" onClick={() => setShowAllSchools((value) => !value)}>{showAllSchools ? 'Show fewer matches' : `Show all ${format(schools.length)} loaded matches`}</button>}{schoolSearch && schoolHasMore && <button className="text-button school-results-more" type="button" disabled={schoolLoading} onClick={() => { setSchoolOffset((value) => value + SCHOOL_PAGE_SIZE); setShowAllSchools(true); }}>{schoolLoading ? 'Loading more…' : 'Load more matches'}</button>}{schoolSearch && !schoolLoading && !schoolError && !schools.length && <p className="inline-note">No schools matched “{schoolSearch}”.</p>}</section><AnalysisPanel groups={analysis.groups} coverage={analysis.coverage} provenance={analysis.provenance} inputRecords={analysis.inputRecords ?? summary.viewport?.collisions ?? null} edgeWarning={analysis.edgeWarning} radius={radius} harm={harm} schoolDistance={schoolDistance} analysisScope={analysisScope} selectedGroup={selectedAnalysisGroup} onGroupSelect={handleAnalysisGroup} onGroupClose={() => { setSelectedAnalysisGroup(null); }} onRun={() => { setSelectedAnalysisGroup(null); setAnalysis({ groups: [], coverage: [], provenance: [], inputRecords: null, edgeWarning: false, error: null }); const requested = activeBBox ? paramsFor(filters, activeBBox, zoom, radius, harm, schoolDistance, selectedSchoolId) : null; setAnalysisScope(requested?.bbox ?? null); setAnalysisRequest(requested); }} onRadius={(value) => { setRadius(value); }} onHarm={(value) => { setHarm(value); }} onSchoolDistance={(value) => { setSchoolDistance(value); }} running={analysisRunning} blocked={blocked} error={analysis.error} /><DetailPanel detail={detail} loading={detailLoading} onClose={() => { detailController.current?.abort(); detailSequence.current += 1; setDetailLoading(false); setDetail(null); setSelectedCollisionId(null); setSelectedPoint(null); }} /><details id="method" className="provenance-panel"><summary>About the data and method</summary><div className="provenance-content"><p>{manifest.source.publisher} · {manifest.source.dataset}. Generated {new Date(manifest.generatedAt).toLocaleDateString('en-GB')}; {format(manifest.collisionCount)} mapped collision rows.</p><p>Persistent groups use a deterministic anchor radius and require three collisions across two calendar years. The bounded analysis is capped at 10,000 matching records. School points come from the published England GIAS and Welsh DataMapWales layers; Welsh independent schools without authoritative public coordinates are excluded and disclosed in the coverage result.</p><p>Authority codes are source-recorded. Selecting a single code can cover only part of a 2021–25 series when an authority changed; location browsing uses the full spatial extent independently of administrative change.</p><p>See <a href="https://www.gov.uk/government/publications/road-safety-stats19-road-accident-and-safety-data" target="_blank" rel="noreferrer">DfT STATS19</a>, <a href="https://get-information-schools.service.gov.uk/" target="_blank" rel="noreferrer">DfE GIAS</a> and <a href="https://datamap.gov.wales/" target="_blank" rel="noreferrer">DataMapWales</a>.</p></div></details><p className="footer-note">Dataset {manifest.datasetVersion} · {manifest.scope}. View totals are exact for the current server query; changing the map extent requests a new bounded result.</p></div></aside></main></div>;
 };
