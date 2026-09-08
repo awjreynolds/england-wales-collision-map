@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vite/
+coverage/
+*.log
+public/data/raw/
+data/raw/
+public/data/*.tmp
+public/data/*.partial
+.DS_Store
+*.tsbuildinfo

@@ -86,7 +86,7 @@ const validateAndNormalise = (value: unknown): { collection: BoundaryCollection;
     throw new Error('Boundary response is not a FeatureCollection');
   }
 
-  const expected = new Map(AUTHORITY_BOUNDARIES.map((authority) => [authority.code, authority.name]));
+  const expected: Map<string, string> = new Map(AUTHORITY_BOUNDARIES.map((authority) => [authority.code, authority.name]));
   const seen = new Set<string>();
   const features: BoundaryFeature[] = root.features.map((rawFeature, index) => {
     const feature = asRecord(rawFeature);
@@ -118,7 +118,7 @@ const validateAndNormalise = (value: unknown): { collection: BoundaryCollection;
     throw new Error(`Expected ${AUTHORITY_BOUNDARIES.length} authority boundaries, received ${features.length}`);
   }
 
-  const order = new Map(AUTHORITY_BOUNDARIES.map(({ code }, index) => [code, index]));
+  const order: Map<string, number> = new Map(AUTHORITY_BOUNDARIES.map(({ code }, index) => [code, index]));
   features.sort((left, right) => (order.get(left.properties.LAD24CD) ?? 0) - (order.get(right.properties.LAD24CD) ?? 0));
   return {
     collection: { type: 'FeatureCollection', features },
@@ -126,16 +126,17 @@ const validateAndNormalise = (value: unknown): { collection: BoundaryCollection;
   };
 };
 
-const fetchBoundaries = async (): Promise<{ collection: BoundaryCollection; sourceCrs: string | null; sourceUrl: string }> => {
+const fetchBoundaries = async (): Promise<{ collection: BoundaryCollection; sourceCrs: string | null; sourceUrl: string; retrievedAt: string }> => {
   const sourceUrl = queryUrl();
   const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(60_000) });
   if (!response.ok) throw new Error(`Boundary request failed with HTTP ${response.status}`);
   const payload: unknown = await response.json();
+  const retrievedAt = new Date().toISOString();
   const validated = validateAndNormalise(payload);
   if (validated.sourceCrs && !validated.sourceCrs.includes('4326')) {
     throw new Error(`Boundary service returned ${validated.sourceCrs}; expected EPSG:4326`);
   }
-  return { ...validated, sourceUrl };
+  return { ...validated, sourceUrl, retrievedAt };
 };
 
 const writeOutputs = async (result: Awaited<ReturnType<typeof fetchBoundaries>>): Promise<void> => {
@@ -158,6 +159,7 @@ const writeOutputs = async (result: Awaited<ReturnType<typeof fetchBoundaries>>)
       licenceUrl: LICENCE_URL,
       attribution: 'Source: Office for National Statistics licensed under the Open Government Licence v.3.0. Contains OS data © Crown copyright and database right 2024.',
     },
+    retrievedAt: result.retrievedAt,
     generatedAt,
     output: {
       file: 'public/data/boundaries.geojson',

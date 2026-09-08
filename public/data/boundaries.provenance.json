@@ -12,7 +12,8 @@
     "licenceUrl": "https://www.ons.gov.uk/methodology/geography/geographicalproducts/digitalboundaries",
     "attribution": "Source: Office for National Statistics licensed under the Open Government Licence v.3.0. Contains OS data © Crown copyright and database right 2024."
   },
-  "generatedAt": "2026-09-08T10:52:47.461Z",
+  "retrievedAt": "2026-09-08T11:22:46.515Z",
+  "generatedAt": "2026-09-08T11:22:46.518Z",
   "output": {
     "file": "public/data/boundaries.geojson",
     "format": "GeoJSON FeatureCollection",
