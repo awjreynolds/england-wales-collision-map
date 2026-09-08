@@ -309,7 +309,7 @@ const dynamicAggregateRecords = (
   maxFeatures: number,
   filters: QueryFilters,
 ): DynamicAggregateResult => {
-  if (!records.length) return { features: [], degrees: Math.max(0.01, Math.min(cellSizeDegrees, 0.01)) };
+  if (!records.length) return { features: [], degrees: cellSizeDegrees };
   const width = bbox.world === true ? 360 : longitudeWidth(bbox.west, bbox.east);
   const height = Math.max(0, bbox.north - bbox.south);
   const span = Math.max(width, height);
@@ -344,16 +344,24 @@ const dynamicAggregateRecords = (
     groupRecords();
     if (degrees >= 180) break;
   }
+  if (groups.size > maxFeatures) {
+    groups = new Map([['all', { x: 0, y: 0, records }]]);
+    degrees = 360;
+  }
   const features: Array<GeoJsonFeature<AggregateProperties>> = [];
   for (const bucket of groups.values()) {
-    const westUnwrapped = bbox.west + bucket.x * degrees;
-    const eastUnwrapped = Math.min(bbox.west + width, westUnwrapped + degrees);
-    const bounds: BBox = {
-      west: normalizedLongitude(westUnwrapped),
-      east: normalizedLongitude(eastUnwrapped),
-      south: bbox.south + bucket.y * degrees,
-      north: Math.min(bbox.north, bbox.south + (bucket.y + 1) * degrees),
-    };
+    const bounds: BBox = degrees >= 360
+      ? { west: bbox.world === true ? -180 : bbox.west, south: bbox.south, east: bbox.world === true ? 180 : bbox.east, north: bbox.north }
+      : (() => {
+        const westUnwrapped = bbox.west + bucket.x * degrees;
+        const eastUnwrapped = Math.min(bbox.west + width, westUnwrapped + degrees);
+        return {
+          west: normalizedLongitude(westUnwrapped),
+          east: normalizedLongitude(eastUnwrapped),
+          south: bbox.south + bucket.y * degrees,
+          north: Math.min(bbox.north, bbox.south + (bucket.y + 1) * degrees),
+        };
+      })();
     features.push(aggregateFeature({ cellKey: `dynamic-${degrees}-${bucket.x}-${bucket.y}`, bounds, recordCount: bucket.records.length, facets: {} }, summarizeRecords(bucket.records, filters)));
   }
   return { features, degrees };
