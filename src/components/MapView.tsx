@@ -139,12 +139,14 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
       if (analysisSource) analysisSource.setData(analysisGeoJson(analysisRef.current));
       const schoolSource = map.getSource('schools') as GeoJSONSource | undefined;
       if (schoolSource) schoolSource.setData(schoolsGeoJson(schoolsRef.current));
-      map.addLayer({ id: 'analysis-ring', type: 'circle', source: 'analysis', paint: { 'circle-color': '#6d28d9', 'circle-radius': ['interpolate', ['linear'], ['get', 'collisions'], 3, 9, 10, 16, 25, 26], 'circle-opacity': .22, 'circle-stroke-color': '#5b21b6', 'circle-stroke-width': 2 } });
-      map.addLayer({ id: 'analysis-label', type: 'symbol', source: 'analysis', layout: { 'text-field': ['to-string', ['get', 'collisions']], 'text-size': 11 }, paint: { 'text-color': '#4c1d95' } });
       map.addLayer({ id: 'school-points', type: 'circle', source: 'schools', layout: { visibility: map.getZoom() >= 8 ? 'visible' : 'none' }, paint: { 'circle-color': '#2563eb', 'circle-radius': 5.5, 'circle-stroke-color': '#dbeafe', 'circle-stroke-width': 2, 'circle-opacity': .9 } });
       map.addLayer({ id: 'aggregate-points', type: 'circle', source: 'view', filter: ['==', ['get', 'kind'], 'aggregate'], paint: { 'circle-color': '#244b69', 'circle-radius': ['interpolate', ['linear'], ['get', 'count'], 1, 6, 20, 13, 100, 22, 1000, 30], 'circle-opacity': .78, 'circle-stroke-color': '#fff', 'circle-stroke-width': 1 } });
       map.addLayer({ id: 'aggregate-label', type: 'symbol', source: 'view', filter: ['==', ['get', 'kind'], 'aggregate'], layout: { 'text-field': ['to-string', ['get', 'count']], 'text-size': 11 }, paint: { 'text-color': '#fff' } });
       map.addLayer({ id: 'collision-points', type: 'circle', source: 'view', filter: ['==', ['get', 'kind'], 'collision'], paint: { 'circle-color': ['match', ['get', 'severity'], 'fatal', SEVERITY_STYLES.fatal.colour, 'serious', SEVERITY_STYLES.serious.colour, 'slight', SEVERITY_STYLES.slight.colour, SEVERITY_STYLES.unknown.colour], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 3.5, 12, 5, 18, 7], 'circle-stroke-color': '#fff', 'circle-stroke-width': 1, 'circle-opacity': .9 } });
+      // Draw hotspot anchors last so the purple signal remains visible above
+      // ordinary collision, aggregate, and school points at dense locations.
+      map.addLayer({ id: 'analysis-ring', type: 'circle', source: 'analysis', paint: { 'circle-color': '#7c3aed', 'circle-radius': ['interpolate', ['linear'], ['get', 'collisions'], 3, 10, 10, 17, 25, 27], 'circle-opacity': .42, 'circle-stroke-color': '#4c1d95', 'circle-stroke-width': 3 } });
+      map.addLayer({ id: 'analysis-label', type: 'symbol', source: 'analysis', layout: { 'text-field': ['to-string', ['get', 'collisions']], 'text-size': 11 }, paint: { 'text-color': '#fff', 'text-halo-color': '#4c1d95', 'text-halo-width': 1.5 } });
       readyRef.current = true;
       const pendingCameraAction = pendingCameraActionRef.current;
       if (pendingCameraAction?.kind === 'reset') {
