@@ -9,10 +9,12 @@ User explicitly authorizes execution in this map and autonomous resolution of im
 
 ## Decisions so far
 
+- [Select reproducible collision and casualty data for all four authorities](issues/01-data-source.md): DfT 2020–2024 records, with pinned archive retrieval for 2020 and explicit child-evidence validation.
+
 - [Establish the data-quality caveat and concentration interpretation](issues/02-quality-and-method.md): primary DfT warnings support a 2022–23 caution window; use bounded ground-distance grouping and four official ONS council polygons.
 
 ## Not yet specified
-Downstream data availability and validation limitations will be settled by source inspection.
+None. Source coverage, missingness, quality caveat, method and stack choice are specified; validation and remaining limitations are recorded in the verification report and README.
 
 ## Out of scope
 Public deployment, exposure-adjusted risk, forecasts, causal before/after estimates and actual KRN/SATN ingestion. Provide documented extension seams only. West of England means the four requested councils, including North Somerset; it is not a claim about combined-authority membership.
