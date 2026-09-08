@@ -66,11 +66,11 @@ exact reference analyses also passed against the batched SQLite import.
 | England, 2025, fatal collisions | 1,244 | 29 | 39 | Points | 1,244 | 26,991 bytes |
 | London, cycle involvement unknown | 412 | 59 | 65 | Points | 412 | 8,499 bytes |
 
-These benchmark timings are individual local measurements, not network latency or
-p95 values. The national summary uses the precomputed summary path; the other
-seven summaries are computed for their selected filters. Compressed sizes use gzip
-on the JSON response and exclude the application bundle, manifest, school layer
-and basemap.
+These adapter benchmark timings are individual local measurements, not network
+latency or p95 values. The national summary uses the precomputed summary path; the
+other seven summaries are computed for their selected filters. Compressed sizes use
+gzip on the JSON response and exclude the application bundle, manifest, school
+layer and basemap.
 
 The Cardiff analysis used 1,238 input collisions and produced 123 persistent
 groups at a 100 m grouping radius. Of these, 81 were within 500 m of a listed
@@ -84,6 +84,41 @@ Collision `2021622100636` returned its full record with one linked casualty and
 one linked vehicle through the compressed detail store; its recorded slight-casualty
 count was zero.
 
+### Deployed Worker checks
+
+The deployed read-only Worker is available at
+[weca-national-query.awjreynolds.workers.dev](https://weca-national-query.awjreynolds.workers.dev/)
+with API version `5c0b8b5d-f317-41ca-b794-1be859e4d4f1`. The remote import completed
+successfully with 4,799 queries in 153,404 ms. The deployed D1 database is
+477,212,672 bytes and reports 493,218 collisions, 493,271 detail rows, 4,933
+compressed detail chunks and 25,936 schools; its annual casualty totals and dataset
+version match the validated release.
+
+The following are single-run remote measurements, not network p95 values:
+
+| Selection | Summary ms | View ms | Drawing mode | Features | Compressed map JSON |
+| --- | ---: | ---: | --- | ---: | ---: |
+| National | 302 | 168 | Aggregates | 38 | 2,107 bytes |
+| Dense London | 552 | 355 | Aggregates | 122 | 4,704 bytes |
+| Cardiff | 165 | 225 | Points | 1,238 | 19,819 bytes |
+| Rural Wales | 130 | 175 | Points | 53 | 1,686 bytes |
+| West of England authorities | 273 | 281 | Aggregates | 11 | 1,201 bytes |
+| Empty sea area | 341 | 152 | Points | 0 | 519 bytes |
+| England, 2025, fatal collisions | 675 | 1,002 | Points | 1,244 | 27,029 bytes |
+| London, cycle involvement unknown | 1,849 | 1,295 | Points | 412 | 8,543 bytes |
+
+All eight remote selections passed their exact reference checks. The deployed
+Cardiff analysis returned 123 groups from 1,238 input collisions, with 81 groups
+within 500 m (65.85%) and 121 within 1 km (98.37%); it completed in 445 ms. The
+slight-only filter returned 73 groups, and a dense London analysis correctly
+returned HTTP 413. Remote collision `2021622100636` returned one casualty and one
+vehicle with a recorded slight-casualty count of zero.
+
+Additional HTTP checks passed: the Wales school query returned two unique results
+on each of two pages, CORS returned `*`, `/manifest` reported 493,218 mappable
+collisions, an invalid bounding box returned HTTP 400 and a POST request returned
+HTTP 405.
+
 ## Review and remaining release gates
 
 Implementation uses Luna Max agents; source reviews use Astra with low reasoning
@@ -92,8 +127,7 @@ effort, corresponding to the requested Astra Light review.
 Review corrections cover retained school inputs, stricter annual source and join
 validation, immutable publication, query projections, empty-result semantics,
 school coverage denominators, bounded geographic searches and request races.
-The national source, database, code and SQL checks above are complete for the final
-combined version. The first remote import failed after a polling timeout, was
-rolled back and confirmed empty; the retry upload is currently in progress. Browser
-validation on the Mac is not complete because the browser is locked, and deployment
-verification remains a pending release gate.
+The national source, database, code, SQL and deployed Worker checks above are
+complete for the final combined version. Frontend publication is next. Browser
+validation on the Mac is not complete because the browser is locked, so that gate
+remains pending.
