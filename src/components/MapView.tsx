@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type StyleSpecification } from 'maplibre-gl';
 import type { AnalysisGroup, BBox, CollisionDetail, DatasetManifest, SchoolRecord, ViewPayload } from '../../service/contract';
-import { pointFeatureToGeoJson } from '../app/data';
 import { SEVERITY_STYLES } from '../domain/config';
+import { layoutScreenMarkers, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 interface MapViewProps {
@@ -33,13 +33,46 @@ const MAP_STYLE: StyleSpecification = {
 };
 
 const emptyCollection = (): GeoJSON.FeatureCollection<GeoJSON.Point, Record<string, unknown>> => ({ type: 'FeatureCollection', features: [] });
-const analysisGeoJson = (groups: AnalysisGroup[]): GeoJSON.FeatureCollection<GeoJSON.Point, Record<string, unknown>> => ({
+const aggregateRadius = (count: number): number => count <= 20 ? 6 + (Math.max(1, count) - 1) * (7 / 19) : count <= 100 ? 13 + (count - 20) * (9 / 80) : 22 + Math.min(8, (count - 100) * (8 / 900));
+const analysisRadius = (collisions: number): number => collisions <= 10 ? 10 + Math.max(0, collisions - 3) * (7 / 7) : 17 + Math.min(10, (collisions - 10) * (10 / 15));
+const collisionRadius = (zoom: number): number => zoom <= 5 ? 3.5 : zoom >= 12 ? 5 : 3.5 + (zoom - 5) * (1.5 / 7);
+const pointMarker = (marker: Omit<ScreenMarker, 'x' | 'y'>, map: MapLibreMap): ScreenMarker => {
+  const point = map.project([marker.longitude, marker.latitude]);
+  return { ...marker, x: point.x, y: point.y };
+};
+const viewMarkers = (view: ViewPayload | null, map: MapLibreMap): ScreenMarker[] => {
+  if (!view) return [];
+  const zoom = map.getZoom();
+  return view.features.features.map((feature) => {
+    const properties = feature.properties;
+    const [longitude, latitude] = feature.geometry.coordinates;
+    if (properties.kind === 'aggregate') return pointMarker({ id: String(feature.id ?? `aggregate:${longitude}:${latitude}`), longitude, latitude, kind: 'aggregate', radius: aggregateRadius(properties.count) + 1, weight: Math.max(1, properties.count), collisionCount: properties.count, bounds: properties.bbox, label: String(properties.count), data: properties }, map);
+    return pointMarker({ id: String(feature.id ?? properties.id), longitude, latitude, kind: 'collision', radius: collisionRadius(zoom) + 1, weight: 1, collisionCount: 1, label: '', severity: properties.severity, data: properties }, map);
+  });
+};
+const analysisMarkers = (groups: AnalysisGroup[], map: MapLibreMap): ScreenMarker[] => groups.map((group) => pointMarker({ id: `analysis:${group.id}`, longitude: group.anchor.longitude, latitude: group.anchor.latitude, kind: 'analysis', radius: analysisRadius(group.collisions) + 3, weight: Math.max(1, group.collisions), label: String(group.collisions), data: group }, map));
+const schoolMarkers = (schools: SchoolRecord[], map: MapLibreMap): ScreenMarker[] => map.getZoom() < 8 ? [] : schools.map((school) => pointMarker({ id: `school:${school.id}`, longitude: school.longitude, latitude: school.latitude, kind: 'school', radius: 7.5, weight: 1, label: '', data: school }, map));
+const displayGeoJson = (groups: ScreenMarkerGroup[], map: MapLibreMap): GeoJSON.FeatureCollection<GeoJSON.Point, Record<string, unknown>> => ({
   type: 'FeatureCollection',
-  features: groups.map((group) => ({ type: 'Feature', id: group.id, geometry: { type: 'Point', coordinates: [group.anchor.longitude, group.anchor.latitude] }, properties: { ...group, kind: 'analysis' } as unknown as Record<string, unknown> })),
-});
-const schoolsGeoJson = (schools: SchoolRecord[]): GeoJSON.FeatureCollection<GeoJSON.Point, Record<string, unknown>> => ({
-  type: 'FeatureCollection',
-  features: schools.map((school) => ({ type: 'Feature', id: school.id, geometry: { type: 'Point', coordinates: [school.longitude, school.latitude] }, properties: school as unknown as Record<string, unknown> })),
+  features: groups.map((group) => {
+    const point = map.unproject([group.x, group.y]);
+    const member = group.members.length === 1 ? group.members[0] : undefined;
+    const strokeWidth = group.kind === 'analysis' ? 3 : group.kind === 'school' ? 2 : 1;
+    return { type: 'Feature', id: group.id, geometry: { type: 'Point', coordinates: [point.lng, point.lat] }, properties: {
+      id: group.id,
+      displayKind: group.kind,
+      severity: member?.severity ?? 'unknown',
+      paintRadius: Math.max(2, group.radius - strokeWidth),
+      strokeWidth,
+      label: group.label,
+      memberCount: group.members.length,
+      collisionCount: group.collisionCount,
+      aggregateCount: group.counts.aggregate,
+      hotspotCount: group.counts.analysis,
+      schoolCount: group.counts.school,
+      bounds: JSON.stringify(group.bounds),
+    } as Record<string, unknown> };
+  }),
 });
 const addDetail = (root: HTMLElement, label: string, value: unknown): void => {
   if (value === null || value === undefined || value === '') return;
@@ -82,12 +115,49 @@ const analysisGroupPopup = (group: AnalysisGroup): HTMLElement => {
   const note = document.createElement('p'); note.className = 'popup-note'; note.textContent = 'School distance is measured from the group anchor. The whole group may extend beyond the anchor radius.'; root.append(note);
   return root;
 };
+const groupedMarkerPopup = (group: ScreenMarkerGroup, onZoom: (() => void) | null, onMember: (member: ScreenMarker) => void): HTMLElement => {
+  const root = document.createElement('article'); root.className = 'map-popup';
+  const title = document.createElement('h3'); title.textContent = 'Markers grouped for display'; root.append(title);
+  const list = document.createElement('dl');
+  addDetail(list, 'Map collisions', group.collisionCount);
+  addDetail(list, 'Hotspot locations', group.counts.analysis);
+  addDetail(list, 'Listed schools', group.counts.school);
+  root.append(list);
+  if (onZoom) {
+    const zoom = document.createElement('button'); zoom.type = 'button'; zoom.className = 'text-button'; zoom.textContent = 'Zoom to this area'; zoom.addEventListener('click', onZoom); root.append(zoom);
+  }
+  const members = document.createElement('div'); members.className = 'group-member-list';
+  let shown = 0;
+  const renderMembers = () => {
+    members.replaceChildren();
+    const visibleMembers = group.members.slice(0, shown + 12);
+    shown = visibleMembers.length;
+    for (const member of visibleMembers) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button';
+      const data = member.data as { name?: string; count?: number; collisions?: number } | undefined;
+      button.textContent = member.kind === 'school' ? data?.name ?? member.id : member.kind === 'analysis' ? `${data?.collisions ?? member.weight} hotspot collisions` : member.kind === 'aggregate' ? `${data?.count ?? member.collisionCount ?? member.weight} collision cell` : `Collision ${member.id}`;
+      button.addEventListener('click', () => onMember(member)); members.append(button);
+    }
+    if (shown < group.members.length) {
+      const more = document.createElement('button'); more.type = 'button'; more.className = 'text-button'; more.textContent = `Show more markers (${group.members.length - shown} remaining)`; more.addEventListener('click', renderMembers); members.append(more);
+    }
+  };
+  renderMembers();
+  root.append(members);
+  const note = document.createElement('p'); note.className = 'popup-note'; note.textContent = 'Counts are retained by marker type; hotspot collisions are not added to map collision totals.'; root.append(note);
+  return root;
+};
 const mapBBox = (map: MapLibreMap): BBox => { const b = map.getBounds(); return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }; };
 const propertyBBox = (value: unknown): BBox | null => {
   const candidate = typeof value === 'string' ? (() => { try { return JSON.parse(value) as unknown; } catch { return null; } })() : value;
   if (!candidate || typeof candidate !== 'object') return null;
   const bbox = candidate as Partial<BBox>;
   return [bbox.west, bbox.south, bbox.east, bbox.north].every((item) => typeof item === 'number' && Number.isFinite(item)) ? { west: bbox.west!, south: bbox.south!, east: bbox.east!, north: bbox.north! } : null;
+};
+const safeGroupBBox = (bbox: BBox): BBox => {
+  const longitudePadding = Math.max(0.005, (bbox.east - bbox.west) * 0.1);
+  const latitudePadding = Math.max(0.005, (bbox.north - bbox.south) * 0.1);
+  return { west: bbox.west - longitudePadding, south: bbox.south - latitudePadding, east: bbox.east + longitudePadding, north: bbox.north + latitudePadding };
 };
 const ensureSource = (map: MapLibreMap, id: string, data: GeoJSON.GeoJSON, options?: Record<string, unknown>): void => {
   if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data, ...(options ?? {}) } as maplibregl.GeoJSONSourceSpecification);
@@ -108,6 +178,9 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
   viewRef.current = view;
   const analysisRef = useRef(analysisGroups);
   analysisRef.current = analysisGroups;
+  const displayGroupsRef = useRef(new Map<string, ScreenMarkerGroup>());
+  const scheduleLayoutRef = useRef<((reveal?: boolean) => void) | null>(null);
+  const hideDisplayRef = useRef<(() => void) | null>(null);
   const selectedPointRef = useRef(selectedPoint);
   selectedPointRef.current = selectedPoint;
   const pendingCameraActionRef = useRef<PendingCameraAction | null>(null);
@@ -126,27 +199,90 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return undefined;
     const camera = initialBBox ?? manifest.extent;
-    const map = new maplibregl.Map({ container: containerRef.current, style: MAP_STYLE, center: [(camera.west + camera.east) / 2, (camera.south + camera.north) / 2], zoom: initialZoom, minZoom: 3, maxZoom: 18, attributionControl: false, dragRotate: false, pitchWithRotate: false, cooperativeGestures: false });
-    mapRef.current = map; map.touchZoomRotate.disableRotation(); map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right'); map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+    const map = new maplibregl.Map({ container: containerRef.current, style: MAP_STYLE, center: [(camera.west + camera.east) / 2, (camera.south + camera.north) / 2], zoom: initialZoom, minZoom: 3, maxZoom: 18, attributionControl: false, dragRotate: false, pitchWithRotate: false, cooperativeGestures: false, fadeDuration: 0 });
+    mapRef.current = map;
+    map.touchZoomRotate.disableRotation();
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+
+    const hideDisplay = () => {
+      layoutGeneration += 1;
+      if (map.getLayer('display-circles')) {
+        map.setPaintProperty('display-circles', 'circle-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-circles', 'circle-stroke-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-circles', 'circle-opacity', 0);
+        map.setPaintProperty('display-circles', 'circle-stroke-opacity', 0);
+      }
+      if (map.getLayer('display-label')) {
+        map.setPaintProperty('display-label', 'text-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-label', 'text-opacity', 0);
+      }
+    };
+    const revealDisplay = () => {
+      if (map.isMoving()) return;
+      if (map.getLayer('display-circles')) {
+        map.setPaintProperty('display-circles', 'circle-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-circles', 'circle-stroke-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-circles', 'circle-opacity', ['match', ['get', 'displayKind'], 'analysis', .42, 'aggregate', .78, 'cluster', .78, .9]);
+        map.setPaintProperty('display-circles', 'circle-stroke-opacity', 1);
+      }
+      if (map.getLayer('display-label')) {
+        map.setPaintProperty('display-label', 'text-opacity-transition', { duration: 0, delay: 0 });
+        map.setPaintProperty('display-label', 'text-opacity', 1);
+      }
+    };
+    const updateDisplay = (): Promise<void> | undefined => {
+      if (!readyRef.current) return undefined;
+      const markers = [...viewMarkers(viewRef.current, map), ...analysisMarkers(analysisRef.current, map), ...schoolMarkers(schoolsRef.current, map)];
+      const groups = layoutScreenMarkers(markers, { gap: 6, maxGroupRadius: 26, maxGroupSpan: 72, clusterDistance: 34, maxDisplayDisplacement: 8 });
+      displayGroupsRef.current = new Map(groups.map((group) => [group.id, group]));
+      const source = map.getSource('display') as GeoJSONSource | undefined;
+      return source?.setData(displayGeoJson(groups, map), true);
+    };
+    let layoutFrame = 0;
+    let revealAfterLayout = false;
+    let layoutGeneration = 0;
+    const scheduleLayout = (reveal = false) => {
+      revealAfterLayout = revealAfterLayout || reveal;
+      if (layoutFrame) return;
+      layoutFrame = requestAnimationFrame(() => {
+        layoutFrame = 0;
+        const generation = ++layoutGeneration;
+        const sourceReady = updateDisplay();
+        sourceReady?.then(() => {
+          const revealAfterRender = () => {
+            if (generation !== layoutGeneration || !revealAfterLayout) return;
+            if (map.isMoving() || !map.isSourceLoaded('display')) {
+              map.once('render', revealAfterRender);
+              return;
+            }
+            revealAfterLayout = false;
+            revealDisplay();
+          };
+          map.once('render', revealAfterRender);
+        }).catch(() => {
+          if (generation === layoutGeneration) revealAfterLayout = false;
+        });
+      });
+    };
+    scheduleLayoutRef.current = scheduleLayout;
+    hideDisplayRef.current = hideDisplay;
     const report = () => callbacks.current.onBoundsChange(mapBBox(map), map.getZoom());
+    const onMoveStart = () => hideDisplay();
+    const onMove = () => scheduleLayout();
+    const onMoveEnd = () => { report(); scheduleLayout(true); };
+    const onWindowResize = () => { hideDisplay(); map.resize(); scheduleLayout(true); };
+
     map.on('load', () => {
-      ensureSource(map, 'view', emptyCollection(), { cluster: false });
-      ensureSource(map, 'analysis', analysisGeoJson([]));
-      ensureSource(map, 'schools', schoolsGeoJson([]));
-      const viewSource = map.getSource('view') as GeoJSONSource | undefined;
-      if (viewSource && viewRef.current) viewSource.setData(pointFeatureToGeoJson(viewRef.current));
-      const analysisSource = map.getSource('analysis') as GeoJSONSource | undefined;
-      if (analysisSource) analysisSource.setData(analysisGeoJson(analysisRef.current));
-      const schoolSource = map.getSource('schools') as GeoJSONSource | undefined;
-      if (schoolSource) schoolSource.setData(schoolsGeoJson(schoolsRef.current));
-      map.addLayer({ id: 'school-points', type: 'circle', source: 'schools', layout: { visibility: map.getZoom() >= 8 ? 'visible' : 'none' }, paint: { 'circle-color': '#2563eb', 'circle-radius': 5.5, 'circle-stroke-color': '#dbeafe', 'circle-stroke-width': 2, 'circle-opacity': .9 } });
-      map.addLayer({ id: 'aggregate-points', type: 'circle', source: 'view', filter: ['==', ['get', 'kind'], 'aggregate'], paint: { 'circle-color': '#244b69', 'circle-radius': ['interpolate', ['linear'], ['get', 'count'], 1, 6, 20, 13, 100, 22, 1000, 30], 'circle-opacity': .78, 'circle-stroke-color': '#fff', 'circle-stroke-width': 1 } });
-      map.addLayer({ id: 'aggregate-label', type: 'symbol', source: 'view', filter: ['==', ['get', 'kind'], 'aggregate'], layout: { 'text-field': ['to-string', ['get', 'count']], 'text-size': 11 }, paint: { 'text-color': '#fff' } });
-      map.addLayer({ id: 'collision-points', type: 'circle', source: 'view', filter: ['==', ['get', 'kind'], 'collision'], paint: { 'circle-color': ['match', ['get', 'severity'], 'fatal', SEVERITY_STYLES.fatal.colour, 'serious', SEVERITY_STYLES.serious.colour, 'slight', SEVERITY_STYLES.slight.colour, SEVERITY_STYLES.unknown.colour], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 3.5, 12, 5, 18, 7], 'circle-stroke-color': '#fff', 'circle-stroke-width': 1, 'circle-opacity': .9 } });
-      // Draw hotspot anchors last so the purple signal remains visible above
-      // ordinary collision, aggregate, and school points at dense locations.
-      map.addLayer({ id: 'analysis-ring', type: 'circle', source: 'analysis', paint: { 'circle-color': '#7c3aed', 'circle-radius': ['interpolate', ['linear'], ['get', 'collisions'], 3, 10, 10, 17, 25, 27], 'circle-opacity': .42, 'circle-stroke-color': '#4c1d95', 'circle-stroke-width': 3 } });
-      map.addLayer({ id: 'analysis-label', type: 'symbol', source: 'analysis', layout: { 'text-field': ['to-string', ['get', 'collisions']], 'text-size': 11 }, paint: { 'text-color': '#fff', 'text-halo-color': '#4c1d95', 'text-halo-width': 1.5 } });
+      ensureSource(map, 'display', emptyCollection());
+      map.addLayer({ id: 'display-circles', type: 'circle', source: 'display', paint: {
+        'circle-color': ['match', ['get', 'displayKind'], 'aggregate', '#244b69', 'cluster', '#244b69', 'analysis', '#7c3aed', 'school', '#2563eb', ['match', ['get', 'severity'], 'fatal', SEVERITY_STYLES.fatal.colour, 'serious', SEVERITY_STYLES.serious.colour, 'slight', SEVERITY_STYLES.slight.colour, SEVERITY_STYLES.unknown.colour]],
+        'circle-radius': ['get', 'paintRadius'],
+        'circle-opacity': ['match', ['get', 'displayKind'], 'analysis', .42, 'aggregate', .78, 'cluster', .78, .9],
+        'circle-stroke-color': ['match', ['get', 'displayKind'], 'analysis', '#4c1d95', 'school', '#dbeafe', '#fff'],
+        'circle-stroke-width': ['get', 'strokeWidth'],
+      } });
+      map.addLayer({ id: 'display-label', type: 'symbol', source: 'display', filter: ['!=', ['get', 'label'], ''], layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#fff', 'text-halo-color': '#17253a', 'text-halo-width': 1.5 } });
       readyRef.current = true;
       const pendingCameraAction = pendingCameraActionRef.current;
       if (pendingCameraAction?.kind === 'reset') {
@@ -155,37 +291,92 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
         const pendingFocus = pendingCameraAction.bbox;
         map.fitBounds([[pendingFocus.west, pendingFocus.south], [pendingFocus.east, pendingFocus.north]], { padding: 80, maxZoom: 16, duration: 0 });
       }
+      hideDisplay();
+      scheduleLayout(true);
       report();
     });
-    map.on('moveend', () => { report(); if (map.getLayer('school-points')) map.setLayoutProperty('school-points', 'visibility', map.getZoom() >= 8 ? 'visible' : 'none'); });
+    map.on('movestart', onMoveStart);
+    map.on('move', onMove);
+    map.on('moveend', onMoveEnd);
+    window.addEventListener('resize', onWindowResize);
     map.on('click', (event) => {
-      const features = map.queryRenderedFeatures(event.point, { layers: ['school-points', 'analysis-ring', 'analysis-label', 'collision-points', 'aggregate-points'] });
-      const feature = features[0]; if (!feature || feature.geometry.type !== 'Point') return;
-      const point = feature.geometry.coordinates as [number, number];
-      if (feature.layer?.id === 'school-points') {
-        const id = String(feature.properties?.id ?? feature.id ?? ''); const school = schoolsRef.current.find((candidate) => candidate.id === id); if (school) callbacks.current.onSchoolClick(school); return;
-      }
-      if (feature.layer?.id === 'aggregate-points') {
-        const bbox = propertyBBox(feature.properties?.bbox); if (bbox) callbacks.current.onAggregateClick(bbox); return;
-      }
-      if (feature.layer?.id === 'analysis-ring' || feature.layer?.id === 'analysis-label') {
-        const id = String(feature.properties?.id ?? feature.id ?? '');
-        const group = analysisRef.current.find((candidate) => candidate.id === id);
-        if (group) callbacks.current.onAnalysisGroupClick(group);
+      const features = map.queryRenderedFeatures(event.point, { layers: ['display-circles', 'display-label'] });
+      const feature = features[0];
+      if (!feature || feature.geometry.type !== 'Point') return;
+      const group = displayGroupsRef.current.get(String(feature.properties?.id ?? feature.id ?? ''));
+      if (!group) return;
+      if (group.members.length > 1) {
+        const bounds = safeGroupBBox(group.bounds);
+        const point = feature.geometry.coordinates as [number, number];
+        const geographicSpan = Math.max(group.bounds.east - group.bounds.west, group.bounds.north - group.bounds.south);
+        const shouldZoom = map.getZoom() < 15 && geographicSpan > 0.0001;
+        if (shouldZoom) callbacks.current.onAggregateClick(bounds);
+        const oldPopup = popupRef.current;
+        if (oldPopup && popupCloseHandlerRef.current) oldPopup.off('close', popupCloseHandlerRef.current);
+        oldPopup?.remove();
+        const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '350px' }).setLngLat(point).setDOMContent(groupedMarkerPopup(group, shouldZoom ? () => callbacks.current.onAggregateClick(bounds) : null, (member) => {
+          popup.remove();
+          if (member.kind === 'school') {
+            const school = schoolsRef.current.find((candidate) => candidate.id === member.id.slice('school:'.length));
+            if (school) callbacks.current.onSchoolClick(school);
+          } else if (member.kind === 'analysis') {
+            const analysis = analysisRef.current.find((candidate) => candidate.id === member.id.slice('analysis:'.length));
+            if (analysis) callbacks.current.onAnalysisGroupClick(analysis);
+          } else if (member.kind === 'aggregate') {
+            const data = member.data as { bbox?: unknown } | undefined;
+            const memberBBox = propertyBBox(data?.bbox);
+            if (memberBBox) callbacks.current.onAggregateClick(memberBBox);
+          } else {
+            callbacks.current.onCollisionClick(member.id, [member.longitude, member.latitude]);
+          }
+        }));
+        const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; };
+        popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupRef.current = popup.addTo(map);
         return;
       }
-      const id = String(feature.properties?.id ?? feature.id ?? ''); if (id) callbacks.current.onCollisionClick(id, point);
+      const member = group.members[0];
+      if (member.kind === 'school') {
+        const schoolId = member.id.slice('school:'.length);
+        const school = schoolsRef.current.find((candidate) => candidate.id === schoolId);
+        if (school) callbacks.current.onSchoolClick(school);
+        return;
+      }
+      if (member.kind === 'analysis') {
+        const analysisId = member.id.slice('analysis:'.length);
+        const analysis = analysisRef.current.find((candidate) => candidate.id === analysisId);
+        if (analysis) callbacks.current.onAnalysisGroupClick(analysis);
+        return;
+      }
+      if (member.kind === 'aggregate') {
+        const data = member.data as { bbox?: unknown } | undefined;
+        const bbox = propertyBBox(data?.bbox);
+        if (bbox) callbacks.current.onAggregateClick(bbox);
+        return;
+      }
+      callbacks.current.onCollisionClick(member.id, [member.longitude, member.latitude]);
     });
-    for (const layer of ['school-points', 'analysis-ring', 'analysis-label', 'collision-points', 'aggregate-points']) { map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; }); map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; }); }
-    return () => { const popup = popupRef.current; if (popup && popupCloseHandlerRef.current) popup.off('close', popupCloseHandlerRef.current); popupCloseHandlerRef.current = null; popupRef.current = null; popup?.remove(); map.remove(); mapRef.current = null; readyRef.current = false; };
+    for (const layer of ['display-circles', 'display-label']) {
+      map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
+    }
+    return () => {
+      if (layoutFrame) cancelAnimationFrame(layoutFrame);
+      window.removeEventListener('resize', onWindowResize);
+      scheduleLayoutRef.current = null;
+      hideDisplayRef.current = null;
+      displayGroupsRef.current.clear();
+      const popup = popupRef.current;
+      if (popup && popupCloseHandlerRef.current) popup.off('close', popupCloseHandlerRef.current);
+      popupCloseHandlerRef.current = null; popupRef.current = null; popup?.remove();
+      map.remove(); mapRef.current = null; readyRef.current = false;
+    };
   }, [manifest.extent, initialBBox, initialZoom]);
 
   useEffect(() => {
-    const map = mapRef.current; if (!map || !readyRef.current) return;
-    const source = map.getSource('view') as GeoJSONSource | undefined; if (source && view) source.setData(pointFeatureToGeoJson(view));
-  }, [view]);
-  useEffect(() => { const map = mapRef.current; if (!map || !readyRef.current) return; const source = map.getSource('analysis') as GeoJSONSource | undefined; source?.setData(analysisGeoJson(analysisGroups)); }, [analysisGroups]);
-  useEffect(() => { const map = mapRef.current; if (!map || !readyRef.current) return; const source = map.getSource('schools') as GeoJSONSource | undefined; source?.setData(schoolsGeoJson(schools)); }, [schools]);
+    if (!mapRef.current || !readyRef.current) return;
+    hideDisplayRef.current?.();
+    scheduleLayoutRef.current?.(true);
+  }, [view, analysisGroups, schools]);
   useEffect(() => { const map = mapRef.current; if (!map || !readyRef.current || resetSignal === 0) return; map.fitBounds([[manifest.extent.west, manifest.extent.south], [manifest.extent.east, manifest.extent.north]], { padding: 36, maxZoom: 8, duration: 650 }); }, [resetSignal, manifest.extent]);
   useEffect(() => { const map = mapRef.current; if (!map || !readyRef.current || !focusBBox) return; map.fitBounds([[focusBBox.west, focusBBox.south], [focusBBox.east, focusBBox.north]], { padding: 80, maxZoom: 16, duration: 650 }); }, [focusBBox]);
   useEffect(() => {

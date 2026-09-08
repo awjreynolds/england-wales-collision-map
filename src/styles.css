@@ -109,6 +109,8 @@ a { color: #155e75; }
 .popup-row dt { color: #64748b; }
 .popup-row dd { margin: 0; color: var(--ink); font-weight: 650; text-align: right; overflow-wrap: anywhere; }
 .popup-note { margin: .65rem 0 0; color: #64748b; font-size: .68rem; line-height: 1.4; }
+.group-member-list { max-height: 14rem; display: grid; gap: .18rem; margin-top: .55rem; overflow: auto; }
+.group-member-list .text-button { display: block; width: 100%; padding: .18rem 0; text-align: left; }
 .map-frame .maplibregl-popup { z-index: 4; }
 
 .quality-note { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .65rem; margin: 0 0 1rem; padding: .78rem .82rem; border: 1px solid #f0d58d; border-left: .24rem solid var(--warning-line); border-radius: .45rem; background: var(--warning-bg); }
