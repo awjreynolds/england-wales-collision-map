@@ -133,7 +133,18 @@ describe('persistent collision site toggle', () => {
     expect((control as HTMLInputElement).disabled).toBe(false);
     expect(vi.mocked(appLoadAnalysis)).not.toHaveBeenCalled();
     expect(within(mapRegion).getByText('Persistent collision site')).toBeTruthy();
+    expect(within(mapRegion).getByText('School · S2 = 2 schools')).toBeTruthy();
     expect(within(mapRegion).getByText('Persistent collision sites are off.')).toBeTruthy();
+  });
+
+  it('explains the dense aggregate fallback at high zoom', async () => {
+    vi.mocked(appLoadView).mockResolvedValue(response({ ...view, mode: 'aggregates' }));
+    render(createElement(App));
+
+    await waitForInitialMap();
+    expect(screen.getByText('Aggregated cells · click a cell to narrow')).toBeTruthy();
+    act(() => latestMap().onBoundsChange(extent, 11));
+    await waitFor(() => expect(screen.getByText('Dense view grouped · zoom in for individual collisions')).toBeTruthy());
   });
 
   it('starts analysis automatically after the toggle is turned on', async () => {

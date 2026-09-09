@@ -25,6 +25,7 @@ import {
   type StaticOverview,
   type StaticSchoolRecord,
 } from './contract';
+import { aggregateFeatureLimit, canReturnPointRecords } from './view-policy';
 
 type MetricWithKsi = StaticAdditiveSummaryMetrics & { ksiCollisions?: number };
 
@@ -470,7 +471,7 @@ const coarsenAggregateFeatures = (
 };
 
 export const buildView = (input: FilteredViewInput): ViewPayload => {
-  const maxFeatures = Math.max(1, input.maxFeatures ?? 2_000);
+  const maxFeatures = aggregateFeatureLimit(input.maxFeatures);
   const selection = selectCells(input.overview, input.bbox);
   const containedSummary = summarizeFacets(selection.contained, input.filters);
   const containedKeys = new Set(selection.contained.map((cell) => cell.cellKey));
@@ -481,10 +482,10 @@ export const buildView = (input: FilteredViewInput): ViewPayload => {
   const edgeSummary = summarizeRecords(edgeRecords, input.filters);
   const summary = mergeSummaryMetrics(containedSummary, edgeSummary);
   const allRecords = (input.pointRecords ?? edgeRecords).filter((record) => matchesRecord(record, input.filters) && (!input.bbox || matchesBBox(record, input.bbox)));
-  const zoom = Math.round(input.zoom ?? 8);
+  const zoom = Number.isFinite(input.zoom) ? input.zoom as number : 8;
   const cellMetrics = selection.contained.map((cell) => ({ cell, metrics: summarizeFacets([cell], input.filters) })).filter(({ metrics }) => metrics.collisions > 0);
   const pointDataComplete = allRecords.length === summary.collisions;
-  if (summary.collisions <= maxFeatures && pointDataComplete) {
+  if (pointDataComplete && canReturnPointRecords(summary.collisions, input)) {
     const features = allRecords.map(feature);
     return {
       mode: 'points', features: { type: 'FeatureCollection', features }, recordCount: summary.collisions,

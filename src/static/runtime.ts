@@ -22,6 +22,7 @@ import type {
 import { staticRecordToDetail } from './engine';
 import { parseFacetDimensions, selectCells, summarizeFacets } from './engine';
 import { StaticWorkerClient } from './worker-client';
+import { canReturnPointRecords, MAX_POINT_VIEW_RECORDS, STATIC_VIEW_RESPONSE_BYTES } from './view-policy';
 
 export interface StaticQueryOptions {
   filters: QueryFilters;
@@ -354,7 +355,7 @@ export class StaticDataRuntime {
       source: { ...manifest.source, urls: [...manifest.source.urls, ...[sourceManifest.sourceUrl, sourceManifest.codebookUrl].filter((value): value is string => typeof value === 'string' && !manifest.source.urls.includes(value))] },
       generatedAt: manifest.generatedAt,
       qualityNotices: qualityNoticesFromManifest(manifest),
-      limits: { viewFeatureLimit: 2_000, viewResponseBytes: 1_000_000, analysisRecordLimit: 10_000, analysisRequiresBbox: true },
+      limits: { viewFeatureLimit: MAX_POINT_VIEW_RECORDS, viewResponseBytes: STATIC_VIEW_RESPONSE_BYTES, analysisRecordLimit: 10_000, analysisRequiresBbox: true },
     };
   }
 
@@ -378,9 +379,9 @@ export class StaticDataRuntime {
     const matchingContained = this.matchingCells(selection.contained, options.filters);
     const edgeRecords = await this.loadTiles(matchingBoundary, manifest, signal);
     const estimate = await this.worker.summary(edgeRecords, options.filters, options.bbox, signal);
-    const pointMode = estimate.collisions <= 2_000;
+    const pointMode = canReturnPointRecords(estimate.collisions, { bbox: options.bbox, zoom: options.zoom });
     const pointRecords = pointMode ? await this.loadTiles([...matchingContained, ...matchingBoundary], manifest, signal) : undefined;
-    const refineRecords = !pointMode && options.bbox && matchingContained.length <= 4 ? await this.loadTiles([...matchingContained, ...matchingBoundary], manifest, signal) : undefined;
+    const refineRecords = !pointMode && estimate.collisions <= MAX_POINT_VIEW_RECORDS && options.bbox && matchingContained.length <= 4 ? await this.loadTiles([...matchingContained, ...matchingBoundary], manifest, signal) : undefined;
     const view = await this.worker.view(edgeRecords, options.filters, options.bbox, options.zoom, pointRecords, refineRecords, signal);
     return { version: 'national.v1', datasetVersion: manifest.datasetVersion, requestKey: responseKey('/view', options), data: view };
   }

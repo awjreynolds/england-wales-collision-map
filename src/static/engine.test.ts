@@ -115,6 +115,40 @@ describe('static engine parity', () => {
     expect(view.features.features[0]?.id).toBe('matching');
   });
 
+  it('uses the raw zoom threshold for complete high-zoom point results and keeps the safety cap', () => {
+    const records = Array.from({ length: 2_001 }, (_, index) => record(`point-${index}`));
+    const highZoom = buildView(viewInput(records, { pointRecords: records, zoom: 11 }));
+    expect(highZoom.mode).toBe('points');
+    expect(highZoom.featureCount).toBe(2_001);
+
+    const justBelowThreshold = buildView(viewInput(records, { pointRecords: records, zoom: 10.99 }));
+    expect(justBelowThreshold.mode).toBe('aggregates');
+    const zoomedOut = buildView(viewInput(records, { pointRecords: records, zoom: 10 }));
+    expect(zoomedOut.mode).toBe('aggregates');
+    expect(buildView(viewInput(records, { pointRecords: records, zoom: 11, maxFeatures: 2_000 })).mode).toBe('aggregates');
+
+    const atSafetyCap = Array.from({ length: 50_000 }, (_, index) => record(`cap-${index}`));
+    expect(buildView(viewInput(atSafetyCap, { pointRecords: atSafetyCap, zoom: 11 })).mode).toBe('points');
+    const overSafetyCap = [...atSafetyCap, record('cap-over')];
+    const overCapView = buildView(viewInput(overSafetyCap, { pointRecords: overSafetyCap, zoom: 11 }));
+    expect(overCapView.mode).toBe('aggregates');
+    expect(overCapView.recordCount).toBe(50_001);
+
+    const incomplete = buildView(viewInput(records, { pointRecords: records.slice(0, -1), zoom: 11 }));
+    expect(incomplete.mode).toBe('aggregates');
+  });
+
+  it('returns complete point records across contained and boundary cells', () => {
+    const boundaryRecords = Array.from({ length: 1_200 }, (_, index) => record(`boundary-${index}`, { longitude: -2.4, latitude: 51.1 }));
+    const containedRecords = Array.from({ length: 1_001 }, (_, index) => record(`contained-${index}`, { longitude: -2.1, latitude: 51.1 }));
+    const records = [...boundaryRecords, ...containedRecords];
+    const boundedBox = { west: -2.49, south: 50.99, east: -1.99, north: 51.51 };
+    const view = buildView({ overview: overviewFor(records), records: boundaryRecords, pointRecords: records, filters, bbox: boundedBox, zoom: 11 });
+    expect(view.mode).toBe('points');
+    expect(view.featureCount).toBe(records.length);
+    expect(new Set(view.features.features.map((feature) => feature.id))).toEqual(new Set(records.map((value) => value.id)));
+  });
+
   it('keeps partial aggregate centers inside the visible box when the edge cell is dense', () => {
     const dense = Array.from({ length: 2_001 }, (_, index) => record(`dense-${index}`, { longitude: -2.99 + (index % 10) * .0001, latitude: 50.01 + (index % 10) * .0001 }));
     const narrowBox = { west: -2.99, south: 50.01, east: -2.98, north: 50.02 };

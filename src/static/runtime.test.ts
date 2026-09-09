@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BBox, QueryFilters, SummaryMetrics, ViewPayload } from '../../service/contract';
-import { metricForRecord } from './engine';
+import { buildView, mergeSummaryMetrics, metricForRecord, selectCells, summarizeFacets, summarizeRecords } from './engine';
 import { STATIC_SCHEMA_VERSION, staticCellBounds, type StaticCollisionEvidence, type StaticCollisionRecord, type StaticManifest, type StaticOverview } from './contract';
 import { StaticDataRuntime } from './runtime';
 
@@ -61,6 +61,29 @@ const overview = (): StaticOverview => {
   };
 };
 
+const denseOverview = (count: number): StaticOverview => {
+  const sample = record('fixture-1');
+  const sampleMetrics = metricForRecord(sample);
+  const additiveSummaryMetrics = {
+    ...sampleMetrics,
+    collisions: count,
+    slightCollisions: count,
+    casualtyCount: count,
+    slightCasualties: count,
+    ksiCollisions: 0,
+  };
+  return {
+    schemaVersion: STATIC_SCHEMA_VERSION,
+    cellSizeDegrees: .25,
+    cells: {
+      [cellKey]: {
+        cellKey, bounds: staticCellBounds(cellKey), recordCount: count,
+        facets: { '2021|England|E00000001|slight|n|n|n': { additiveSummaryMetrics } },
+      },
+    },
+  };
+};
+
 const buildFixture = async (): Promise<{ manifest: StaticManifest; bytes: Map<string, Uint8Array>; evidenceBucket: string; detail: StaticCollisionRecord & { evidence: StaticCollisionEvidence } }> => {
   const tile = [record('fixture-1')];
   const evidence: StaticCollisionRecord & { evidence: StaticCollisionEvidence } = {
@@ -86,11 +109,62 @@ const buildFixture = async (): Promise<{ manifest: StaticManifest; bytes: Map<st
   return { manifest, bytes: compressed, evidenceBucket, detail: evidence };
 };
 
+const buildDenseFixture = async (count = 2_001): Promise<Awaited<ReturnType<typeof buildFixture>>> => {
+  const dense = await buildFixture();
+  const tile = Array.from({ length: count }, (_, index) => record(index === 0 ? 'fixture-1' : `fixture-${index + 1}`));
+  const overviewBytes = await gzip(denseOverview(count));
+  const tileBytes = await gzip(tile);
+  dense.bytes.set('overview.json.gz', overviewBytes);
+  dense.bytes.set(tilePath, tileBytes);
+  dense.manifest.collisionCount = count;
+  dense.manifest.detailCount = count;
+  dense.manifest.artifacts['overview.json.gz'] = { ...dense.manifest.artifacts['overview.json.gz'], bytes: overviewBytes.byteLength, sha256: await digest(overviewBytes) };
+  dense.manifest.artifacts[tilePath] = { ...dense.manifest.artifacts[tilePath], bytes: tileBytes.byteLength, sha256: await digest(tileBytes) };
+  dense.bytes.set('manifest.json', new TextEncoder().encode(JSON.stringify(dense.manifest)));
+  return dense;
+};
+
 class StubWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   postMessage(message: { id: number; type: string }): void {
     const value = message.type === 'init' || message.type === 'schools' ? true : message.type === 'summary' ? summary() : view();
+    queueMicrotask(() => this.onmessage?.({ data: { id: message.id, ok: true, value } } as MessageEvent));
+  }
+  terminate(): void { /* fixture worker */ }
+}
+
+type EngineWorkerMessage = {
+  id: number;
+  type: string;
+  overview?: StaticOverview;
+  records?: StaticCollisionRecord[];
+  pointRecords?: StaticCollisionRecord[];
+  refineRecords?: StaticCollisionRecord[];
+  filters?: QueryFilters;
+  bbox?: BBox;
+  zoom?: number;
+};
+
+class EngineStubWorker {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  private overview: StaticOverview | null = null;
+  postMessage(message: EngineWorkerMessage): void {
+    let value: unknown;
+    if (message.type === 'init') {
+      this.overview = message.overview ?? null;
+      value = true;
+    } else if (message.type === 'summary') {
+      if (!this.overview || !message.filters) throw new Error('Missing engine fixture state.');
+      const selection = selectCells(this.overview, message.bbox);
+      value = mergeSummaryMetrics(summarizeFacets(selection.contained, message.filters), summarizeRecords(message.records ?? [], message.filters, message.bbox));
+    } else if (message.type === 'view') {
+      if (!this.overview || !message.filters) throw new Error('Missing engine fixture state.');
+      value = buildView({ overview: this.overview, records: message.records ?? [], pointRecords: message.pointRecords, refineRecords: message.refineRecords, filters: message.filters, bbox: message.bbox, zoom: message.zoom });
+    } else {
+      value = true;
+    }
     queueMicrotask(() => this.onmessage?.({ data: { id: message.id, ok: true, value } } as MessageEvent));
   }
   terminate(): void { /* fixture worker */ }
@@ -125,6 +199,8 @@ describe('static data runtime', () => {
     const second = await runtime.loadManifest();
     expect(second.datasetVersion).toBe('fixture-v1');
     expect(calls.filter((url) => url.includes('manifest.json')).length).toBe(1);
+    expect(second.data.limits.viewFeatureLimit).toBe(50_000);
+    expect(second.data.limits.viewResponseBytes).toBe(50_000_000);
   });
 
   it('loads only the intersecting boundary tile for an exact summary', async () => {
@@ -140,6 +216,23 @@ describe('static data runtime', () => {
     const response = await runtime.loadView({ filters, bbox, zoom: 8 });
     expect(response.data.mode).toBe('aggregates');
     expect(calls.filter((url) => url.includes(`/tiles/${cellKey}.json.gz`))).toHaveLength(1);
+  });
+
+  it('uses the actual engine to return more than 2,000 bounded points only at high zoom', async () => {
+    fixture = await buildDenseFixture();
+    vi.stubGlobal('Worker', EngineStubWorker);
+    const highZoomRuntime = new StaticDataRuntime();
+    const highZoom = await highZoomRuntime.loadView({ filters, bbox, zoom: 11 });
+    expect(highZoom.data.mode).toBe('points');
+    expect(highZoom.data.recordCount).toBe(2_001);
+    expect(highZoom.data.featureCount).toBe(2_001);
+
+    highZoomRuntime.dispose();
+    const lowZoomRuntime = new StaticDataRuntime();
+    const lowZoom = await lowZoomRuntime.loadView({ filters, bbox, zoom: 10.99 });
+    expect(lowZoom.data.mode).toBe('aggregates');
+    expect(lowZoom.data.recordCount).toBe(2_001);
+    expect(lowZoom.data.featureCount).toBeLessThanOrEqual(2_000);
   });
 
   it('fetches collision evidence directly by deterministic hash bucket', async () => {
