@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutScreenMarkers, screenMarkerGap, type ScreenMarker } from './screenMarkers';
+import { INDIVIDUAL_COLLISION_LIMIT, layoutScreenMarkers, screenMarkerGap, showIndividualCollisions, type ScreenMarker } from './screenMarkers';
 
 const marker = (id: string, x: number, y: number, kind: ScreenMarker['kind'] = 'collision', overrides: Partial<ScreenMarker> = {}): ScreenMarker => ({
   id, x, y, radius: 8, kind, weight: 1, longitude: x / 100, latitude: y / 100, ...overrides,
@@ -12,6 +12,40 @@ const expectGap = (groups: ReturnType<typeof layoutScreenMarkers>, minimum = 6):
 };
 
 describe('screen marker layout', () => {
+  it('keeps small collision results as individual exact-coordinate markers at the threshold', () => {
+    expect(showIndividualCollisions(0)).toBe(true);
+    expect(showIndividualCollisions(22)).toBe(true);
+    expect(showIndividualCollisions(199)).toBe(true);
+    expect(showIndividualCollisions(INDIVIDUAL_COLLISION_LIMIT)).toBe(false);
+
+    const collisions = Array.from({ length: 22 }, (_, index) => marker(`collision-${index}`, 50, 50, 'collision', {
+      longitude: -2.5 + index * 0.0001,
+      latitude: 51 + index * 0.0001,
+      severity: index % 2 ? 'serious' : 'slight',
+    }));
+    const persistent = marker('analysis:site-1', 50, 50, 'analysis', { weight: 3, label: '3' });
+    const school = marker('school:school-1', 50, 50, 'school');
+    const groups = layoutScreenMarkers([...collisions, persistent, school], { individualMarkers: true });
+    const collisionGroups = groups.filter((group) => group.members[0]?.kind === 'collision');
+    expect(collisionGroups).toHaveLength(22);
+    expect(collisionGroups.every((group) => group.members.length === 1)).toBe(true);
+    expect(new Set(collisionGroups.map((group) => group.members[0]?.id))).toEqual(new Set(collisions.map((item) => item.id)));
+    expect(collisionGroups.every((group) => {
+      const member = group.members[0];
+      const source = collisions.find((item) => item.id === member?.id);
+      return Boolean(member && source && member.x === source.x && member.y === source.y && member.longitude === source.longitude && member.latitude === source.latitude && member.severity === source.severity);
+    })).toBe(true);
+    expect(groups.some((group) => group.members.some((member) => member.id === persistent.id) && group.members.length === 1)).toBe(true);
+    expect(groups.some((group) => group.members.some((member) => member.id === school.id) && group.members.length === 1)).toBe(true);
+
+    const boundaryCollisions = Array.from({ length: 200 }, (_, index) => marker(`boundary-${index}`, 20, 20, 'collision'));
+    const individual = layoutScreenMarkers(boundaryCollisions.slice(0, 199), { individualMarkers: showIndividualCollisions(199) });
+    const grouped = layoutScreenMarkers(boundaryCollisions, { individualMarkers: showIndividualCollisions(200) });
+    expect(individual).toHaveLength(199);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0].collisionCount).toBe(200);
+  });
+
   it('keeps every rendered circle at least six pixels clear of every other circle', () => {
     const groups = layoutScreenMarkers([
       marker('a', 0, 0, 'aggregate', { radius: 30, collisionCount: 2 }),
@@ -44,7 +78,7 @@ describe('screen marker layout', () => {
     expect(groups[0].collisionCount).toBe(10);
   });
 
-  it('does not lose coincident mixed markers or double count hotspot collisions', () => {
+  it('does not lose coincident mixed markers or double count persistent-site collisions', () => {
     const groups = layoutScreenMarkers([
       marker('cell', 50, 50, 'aggregate', { collisionCount: 25 }),
       marker('hotspot', 50, 50, 'analysis', { weight: 25, collisionCount: 25 }),

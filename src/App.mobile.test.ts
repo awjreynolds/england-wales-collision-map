@@ -103,7 +103,7 @@ const analysis: AnalysisPayload = {
 const response = <T,>(data: T) => ({ version: 'national.v1' as const, datasetVersion, requestKey: 'fixture', data });
 const summary = (scope: SummaryPayload['scope']): SummaryPayload => ({ scope, metrics, exact: true, precomputed: false });
 
-describe('mobile hotspot entry point', () => {
+describe('persistent collision site toggle', () => {
   beforeEach(() => {
     window.history.replaceState(null, '', '/');
     vi.clearAllMocks();
@@ -119,70 +119,177 @@ describe('mobile hotspot entry point', () => {
     cleanup();
   });
 
-  it('exposes a directly reachable Show hotspots action in the map region', async () => {
+  const toggle = async () => screen.findByRole('checkbox', { name: 'Persistent collision sites' });
+  const latestMap = () => mapProps.mock.calls.at(-1)?.[0] as { analysisGroups: AnalysisGroup[]; onBoundsChange: (bbox: typeof extent, zoom: number) => void; onAnalysisGroupClick: (group: AnalysisGroup) => void };
+  const waitForInitialMap = () => waitFor(() => expect(appLoadView).toHaveBeenCalledTimes(1));
+
+  it('keeps persistent collision sites off by default and exposes an accessible toggle', async () => {
     render(createElement(App));
 
     const mapRegion = await screen.findByRole('region', { name: /england and wales collision map/i });
-    await waitFor(() => expect((within(mapRegion).getByRole('button', { name: /show hotspots/i }) as HTMLButtonElement).disabled).toBe(false));
-    expect(within(mapRegion).getByText('Hotspot location')).toBeTruthy();
+    const control = await toggle();
+    await waitForInitialMap();
+    expect((control as HTMLInputElement).checked).toBe(false);
+    expect((control as HTMLInputElement).disabled).toBe(false);
+    expect(vi.mocked(appLoadAnalysis)).not.toHaveBeenCalled();
+    expect(within(mapRegion).getByText('Persistent collision site')).toBeTruthy();
+    expect(within(mapRegion).getByText('Persistent collision sites are off.')).toBeTruthy();
   });
 
-  it('sends the visible bounded extent to analysis and renders returned groups on the map', async () => {
+  it('starts analysis automatically after the toggle is turned on', async () => {
     render(createElement(App));
 
-    const showHotspotsButton = await screen.findByRole('button', { name: 'Show hotspots' });
-    await waitFor(() => expect((showHotspotsButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(showHotspotsButton);
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
 
     await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
     expect(vi.mocked(appLoadAnalysis).mock.calls[0]?.[0]).toMatchObject({ bbox: extent, radiusMetres: 100, harmFilter: 'all', filters });
-    await waitFor(() => expect(mapProps.mock.calls.at(-1)?.[0].analysisGroups).toEqual([group]));
+    await waitFor(() => expect(latestMap().analysisGroups).toEqual([group]));
     expect(screen.getByTestId('mock-map').textContent).toContain('analysis groups: 1');
+    expect(screen.getByText(/1 persistent collision site shown/i)).toBeTruthy();
   });
 
-  it('keeps the saved analysis status while the live map extent changes', async () => {
+  it('recomputes automatically for settled bbox and filter changes', async () => {
+    render(createElement(App));
+
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+
+    vi.mocked(appLoadAnalysis).mockClear();
+    const nextBBox = { west: -1, south: 50, east: -.5, north: 51 };
+    act(() => latestMap().onBoundsChange(nextBBox, 5));
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(appLoadAnalysis).mock.calls[0]?.[0]).toMatchObject({ bbox: nextBBox });
+
+    vi.mocked(appLoadAnalysis).mockClear();
+    fireEvent.change(screen.getByLabelText(/anchor radius/i), { target: { value: '200' } });
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(appLoadAnalysis).mock.calls[0]?.[0]).toMatchObject({ bbox: nextBBox, radiusMetres: 200 });
+
+    vi.mocked(appLoadAnalysis).mockClear();
+    fireEvent.click(screen.getByLabelText('2021'));
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(appLoadAnalysis).mock.calls[0]?.[0]).toMatchObject({ bbox: nextBBox, radiusMetres: 200, filters: { ...filters, years: [2021] } });
+  });
+
+  it('clears sites on disable and ignores a late aborted result', async () => {
+    let resolveAnalysis!: (value: Awaited<ReturnType<typeof appLoadAnalysis>>) => void;
+    vi.mocked(appLoadAnalysis).mockImplementation((_options, signal) => new Promise((resolve) => { resolveAnalysis = resolve; expect(signal?.aborted).toBe(false); }));
+    render(createElement(App));
+
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect((control as HTMLInputElement).disabled).toBe(false);
+
+    fireEvent.click(control);
+    expect((control as HTMLInputElement).checked).toBe(false);
+    expect(latestMap().analysisGroups).toEqual([]);
+    expect((vi.mocked(appLoadAnalysis).mock.calls[0]?.[1] as AbortSignal | undefined)?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveAnalysis(response(analysis));
+    });
+    await waitFor(() => expect(latestMap().analysisGroups).toEqual([]));
+    expect(screen.getByText('Persistent collision sites are off.')).toBeTruthy();
+  });
+
+  it('clears the selected site inspection when disabled', async () => {
+    render(createElement(App));
+
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(latestMap().analysisGroups).toEqual([group]));
+    act(() => latestMap().onAnalysisGroupClick(group));
+    await waitFor(() => expect(screen.getByText('Group inspection')).toBeTruthy());
+
+    fireEvent.click(control);
+    expect(screen.queryByText('Group inspection')).toBeNull();
+    expect(latestMap().analysisGroups).toEqual([]);
+  });
+
+  it('keeps the selected site inspection through an automatic refresh when the site remains', async () => {
+    render(createElement(App));
+
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(latestMap().analysisGroups).toEqual([group]));
+    act(() => latestMap().onAnalysisGroupClick(group));
+    await waitFor(() => expect(screen.getByText('Group inspection')).toBeTruthy());
+
+    vi.mocked(appLoadAnalysis).mockClear();
+    const nextBBox = { west: -1, south: 50, east: -.5, north: 51 };
+    act(() => latestMap().onBoundsChange(nextBBox, 5));
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText('Group inspection')).toBeTruthy());
+    expect(screen.getByText('Selected persistent collision site')).toBeTruthy();
+  });
+
+  it('pauses above 10,000 records and resumes automatically after narrowing', async () => {
+    let oversize = true;
+    const largeMetrics = { ...metrics, collisions: 10_001 };
+    vi.mocked(appLoadSummary).mockImplementation(async (options) => response({ ...summary({ filters: options.filters, ...(options.bbox ? { bbox: options.bbox } : {}) }), metrics: options.bbox && oversize ? largeMetrics : metrics }));
+    render(createElement(App));
+
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(screen.getByText('Persistent collision sites are paused above 10,000 matching records; narrow the map or filters to resume automatically.')).toBeTruthy());
+    expect((control as HTMLInputElement).checked).toBe(true);
+    expect(appLoadAnalysis).not.toHaveBeenCalled();
+
+    oversize = false;
+    const nextBBox = { west: -1, south: 50, east: -.5, north: 51 };
+    act(() => latestMap().onBoundsChange(nextBBox, 5));
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(appLoadAnalysis).mock.calls[0]?.[0]).toMatchObject({ bbox: nextBBox });
+  });
+
+  it('remains switchable off while analysis is loading or returns an error', async () => {
     let resolveAnalysis!: (value: Awaited<ReturnType<typeof appLoadAnalysis>>) => void;
     vi.mocked(appLoadAnalysis).mockImplementation(() => new Promise((resolve) => { resolveAnalysis = resolve; }));
     render(createElement(App));
 
-    const showHotspotsButton = await screen.findByRole('button', { name: 'Show hotspots' });
-    await waitFor(() => expect((showHotspotsButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(showHotspotsButton);
-    await waitFor(() => expect(screen.getByText(/Finding hotspot locations in the 49\.00° to 56\.00° N/i)).toBeTruthy());
+    const control = await toggle();
+    await waitForInitialMap();
+    fireEvent.click(control);
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(1));
+    expect((control as HTMLInputElement).disabled).toBe(false);
+    fireEvent.click(control);
+    expect((control as HTMLInputElement).checked).toBe(false);
+    expect((vi.mocked(appLoadAnalysis).mock.calls[0]?.[1] as AbortSignal | undefined)?.aborted).toBe(true);
+    await act(async () => {
+      resolveAnalysis(response(analysis));
+    });
+    await waitFor(() => expect(latestMap().analysisGroups).toEqual([]));
 
-    const nextBBox = { west: -1, south: 50, east: -.5, north: 51 };
-    const latestMapProps = mapProps.mock.calls.at(-1)?.[0] as { onBoundsChange: (bbox: typeof extent, zoom: number) => void };
-    act(() => latestMapProps.onBoundsChange(nextBBox, 5));
-    await waitFor(() => expect(screen.getByText(/Finding hotspot locations in the 49\.00° to 56\.00° N/i)).toBeTruthy());
-    const status = document.getElementById('map-analysis-status');
-    expect(status?.textContent).toContain('49.00° to 56.00° N');
-    expect(status?.textContent).not.toContain('50.00° to 51.00° N');
-
-    resolveAnalysis(response(analysis));
-    await waitFor(() => expect(screen.getByText(/1 hotspot location shown\. Saved area: 49\.00° to 56\.00° N\./i)).toBeTruthy());
+    vi.mocked(appLoadAnalysis).mockRejectedValueOnce(new Error('analysis unavailable'));
+    fireEvent.click(control);
+    await waitFor(() => expect(appLoadAnalysis).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText(/Persistent collision site analysis failed: analysis unavailable/i)).toBeTruthy());
+    expect((control as HTMLInputElement).disabled).toBe(false);
+    fireEvent.click(control);
+    expect((control as HTMLInputElement).checked).toBe(false);
   });
 
-  it('keeps the map action disabled and explains the analysis limit for a large extent', async () => {
-    const largeMetrics = { ...metrics, collisions: 10_001 };
-    vi.mocked(appLoadSummary).mockImplementation(async (options) => response({ ...summary({ filters: options.filters, ...(options.bbox ? { bbox: options.bbox } : {}) }), metrics: options.bbox ? largeMetrics : metrics }));
-    render(createElement(App));
-
-    const showHotspotsButton = await screen.findByRole('button', { name: 'Show hotspots' });
-    await waitFor(() => expect((showHotspotsButton as HTMLButtonElement).disabled).toBe(true));
-    expect(screen.getByText(/below 10,000 matching records/i)).toBeTruthy();
-    expect(appLoadAnalysis).not.toHaveBeenCalled();
-  });
-
-  it('shows the map request error and retries from the map overlay', async () => {
+  it('shows map request errors and keeps the toggle available for retry', async () => {
     const requestError = new Error('Published map shard unavailable');
     vi.mocked(appLoadView).mockRejectedValueOnce(requestError).mockResolvedValue(response(view));
     render(createElement(App));
 
-    await waitFor(() => expect(document.getElementById('map-analysis-status')?.textContent).toContain('Published map shard unavailable'));
+    await waitFor(() => expect(document.querySelector('.map-stale-banner')?.textContent).toContain('Published map shard unavailable'));
     expect(screen.getByRole('button', { name: 'Retry map request' })).toBeTruthy();
+    const control = await toggle();
+    expect((control as HTMLInputElement).disabled).toBe(false);
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry map request' }));
     await waitFor(() => expect(appLoadView).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(document.getElementById('map-analysis-status')?.textContent).toContain('Hotspots are hidden'));
+    await waitFor(() => expect(document.getElementById('map-analysis-status')?.textContent).toContain('Persistent collision sites are off.'));
   });
 });

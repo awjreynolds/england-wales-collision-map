@@ -609,7 +609,7 @@ const edgeWarningFor = (groups: AnalysisGroup[], bbox: BBox, radiusMetres: numbe
 
 export const buildAnalysis = (input: AnalysisInput): AnalysisPayload => {
   const filtered = input.records.filter((record) => matchesRecord(record, input.filters) && matchesBBox(record, input.bbox));
-  if (filtered.length > 10_000) throw new Error('Persistent-location analysis is limited to 10,000 matching records.');
+  if (filtered.length > 10_000) throw new Error('Persistent collision site analysis is limited to 10,000 matching records.');
   const locations = groupPersistentLocations(filtered.map(toCollisionRecord), input.radiusMetres, 3, 2);
   const byId = new Map(filtered.map((record) => [record.id, record]));
   const candidates = input.schools.filter((school) => matchesBBox({ latitude: school.lat, longitude: school.lon }, expandedBBox(input.bbox, 1_000)));

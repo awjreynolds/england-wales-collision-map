@@ -386,7 +386,7 @@ export class StaticDataRuntime {
   }
 
   async loadAnalysis(options: StaticQueryOptions, signal?: AbortSignal): Promise<ApiResponse<AnalysisPayload>> {
-    if (!options.bbox) throw new StaticDataError('Hotspot analysis requires a map bounding box.', 'bbox_required', 400);
+    if (!options.bbox) throw new StaticDataError('Persistent collision site analysis requires a map bounding box.', 'bbox_required', 400);
     const { manifest, overview } = await this.ensureWorker(signal);
     const selection = selectCells(overview, options.bbox);
     const matchingBoundary = this.matchingCells(selection.boundary, options.filters);

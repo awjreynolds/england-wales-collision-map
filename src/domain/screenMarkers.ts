@@ -64,6 +64,8 @@ export interface ScreenMarkerGroup {
 }
 
 export interface ScreenMarkerLayoutOptions {
+  /** Keep every input marker as its own exact-coordinate display point. */
+  individualMarkers?: boolean;
   /** Minimum edge gap between every rendered circle. */
   gap?: number;
   /** Maximum outer radius of any rendered marker. */
@@ -79,6 +81,7 @@ export interface ScreenMarkerLayoutOptions {
 }
 
 const DEFAULTS: Required<ScreenMarkerLayoutOptions> = {
+  individualMarkers: false,
   gap: 6,
   maxGroupRadius: 26,
   maxGroupSpan: 72,
@@ -86,6 +89,9 @@ const DEFAULTS: Required<ScreenMarkerLayoutOptions> = {
   maxSeparationPasses: 24,
   maxDisplayDisplacement: 8,
 };
+
+export const INDIVIDUAL_COLLISION_LIMIT = 200;
+export const showIndividualCollisions = (recordCount: number): boolean => Number.isFinite(recordCount) && recordCount < INDIVIDUAL_COLLISION_LIMIT;
 
 const finite = (value: number, fallback = 0): number => Number.isFinite(value) ? value : fallback;
 const markerWeight = (marker: ScreenMarker): number => Math.max(0, finite(marker.weight, 0));
@@ -320,6 +326,7 @@ const separateGroups = (groups: ScreenMarkerGroup[], options: Required<ScreenMar
 export const layoutScreenMarkers = (markers: ScreenMarker[], providedOptions: ScreenMarkerLayoutOptions = {}): ScreenMarkerGroup[] => {
   const options = { ...DEFAULTS, ...providedOptions };
   if (!markers.length) return [];
+  if (options.individualMarkers) return markers.map((marker) => makeGroup([marker], options)).sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
   const groups = seedGroups(markers, options);
   separateGroups(groups, options);
   return groups.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));

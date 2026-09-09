@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type StyleSpecification } from 'maplibre-gl';
 import type { AnalysisGroup, BBox, CollisionDetail, DatasetManifest, SchoolRecord, ViewPayload } from '../../service/contract';
 import { SEVERITY_STYLES } from '../domain/config';
-import { layoutScreenMarkers, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
+import { layoutScreenMarkers, showIndividualCollisions, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 interface MapViewProps {
@@ -43,10 +43,11 @@ const pointMarker = (marker: Omit<ScreenMarker, 'x' | 'y'>, map: MapLibreMap): S
 const viewMarkers = (view: ViewPayload | null, map: MapLibreMap): ScreenMarker[] => {
   if (!view) return [];
   const zoom = map.getZoom();
+  const individualCollisions = showIndividualCollisions(view.recordCount);
   return view.features.features.map((feature) => {
     const properties = feature.properties;
     const [longitude, latitude] = feature.geometry.coordinates;
-    if (properties.kind === 'aggregate') return pointMarker({ id: String(feature.id ?? `aggregate:${longitude}:${latitude}`), longitude, latitude, kind: 'aggregate', radius: aggregateRadius(properties.count) + 1, weight: Math.max(1, properties.count), collisionCount: properties.count, bounds: properties.bbox, label: String(properties.count), data: properties }, map);
+    if (properties.kind === 'aggregate') return pointMarker({ id: String(feature.id ?? `aggregate:${longitude}:${latitude}`), longitude, latitude, kind: 'aggregate', radius: aggregateRadius(properties.count) + 1, weight: Math.max(1, properties.count), collisionCount: properties.count, bounds: properties.bbox, label: individualCollisions ? '' : String(properties.count), data: properties }, map);
     return pointMarker({ id: String(feature.id ?? properties.id), longitude, latitude, kind: 'collision', radius: collisionRadius(zoom) + 1, weight: 1, collisionCount: 1, label: '', severity: properties.severity, data: properties }, map);
   });
 };
@@ -74,6 +75,22 @@ const displayGeoJson = (groups: ScreenMarkerGroup[], map: MapLibreMap): GeoJSON.
     } as Record<string, unknown> };
   }),
 });
+const collisionPickerGroup = (members: ScreenMarker[], source: ScreenMarkerGroup): ScreenMarkerGroup => {
+  const counts = members.reduce((result, member) => {
+    result[member.kind] += 1;
+    return result;
+  }, { collision: 0, aggregate: 0, analysis: 0, school: 0 });
+  const collisionCount = members.reduce((count, member) => count + (member.kind === 'collision' ? 1 : member.kind === 'aggregate' ? member.collisionCount ?? 0 : 0), 0);
+  return {
+    ...source,
+    id: `collision-picker:${members.map((member) => member.id).sort().join('|')}`,
+    kind: 'cluster',
+    members,
+    counts,
+    collisionCount,
+    label: '',
+  };
+};
 const addDetail = (root: HTMLElement, label: string, value: unknown): void => {
   if (value === null || value === undefined || value === '') return;
   const row = document.createElement('div'); row.className = 'popup-row';
@@ -100,7 +117,7 @@ const nullableMetric = (metric: { value: number | null; unknownRecords: number }
 };
 const analysisGroupPopup = (group: AnalysisGroup): HTMLElement => {
   const root = document.createElement('article'); root.className = 'map-popup';
-  const title = document.createElement('h3'); title.textContent = 'Persistent collision location'; root.append(title);
+  const title = document.createElement('h3'); title.textContent = 'Persistent collision site'; root.append(title);
   const list = document.createElement('dl');
   addDetail(list, 'Recurrence', `${group.collisions} collisions across ${group.yearsRepresented.join(', ')}`);
   addDetail(list, 'Collision harm', `${group.harm.collisionSeverity.fatal} fatal · ${group.harm.collisionSeverity.serious} serious · ${group.harm.collisionSeverity.slight} slight`);
@@ -120,7 +137,7 @@ const groupedMarkerPopup = (group: ScreenMarkerGroup, onZoom: (() => void) | nul
   const title = document.createElement('h3'); title.textContent = 'Markers grouped for display'; root.append(title);
   const list = document.createElement('dl');
   addDetail(list, 'Map collisions', group.collisionCount);
-  addDetail(list, 'Hotspot locations', group.counts.analysis);
+  addDetail(list, 'Persistent collision sites', group.counts.analysis);
   addDetail(list, 'Listed schools', group.counts.school);
   root.append(list);
   if (onZoom) {
@@ -135,7 +152,7 @@ const groupedMarkerPopup = (group: ScreenMarkerGroup, onZoom: (() => void) | nul
     for (const member of visibleMembers) {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button';
       const data = member.data as { name?: string; count?: number; collisions?: number } | undefined;
-      button.textContent = member.kind === 'school' ? data?.name ?? member.id : member.kind === 'analysis' ? `${data?.collisions ?? member.weight} hotspot collisions` : member.kind === 'aggregate' ? `${data?.count ?? member.collisionCount ?? member.weight} collision cell` : `Collision ${member.id}`;
+      button.textContent = member.kind === 'school' ? data?.name ?? member.id : member.kind === 'analysis' ? `${data?.collisions ?? member.weight} collisions at persistent site` : member.kind === 'aggregate' ? `${data?.count ?? member.collisionCount ?? member.weight} collision cell` : `Collision ${member.id}`;
       button.addEventListener('click', () => onMember(member)); members.append(button);
     }
     if (shown < group.members.length) {
@@ -144,7 +161,7 @@ const groupedMarkerPopup = (group: ScreenMarkerGroup, onZoom: (() => void) | nul
   };
   renderMembers();
   root.append(members);
-  const note = document.createElement('p'); note.className = 'popup-note'; note.textContent = 'Counts are retained by marker type; hotspot collisions are not added to map collision totals.'; root.append(note);
+  const note = document.createElement('p'); note.className = 'popup-note'; note.textContent = 'Counts are retained by marker type; persistent collision site members are not added to map collision totals.'; root.append(note);
   return root;
 };
 const mapBBox = (map: MapLibreMap): BBox => { const b = map.getBounds(); return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }; };
@@ -170,6 +187,7 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
   const readyRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const popupCloseHandlerRef = useRef<(() => void) | null>(null);
+  const popupModeRef = useRef<'grouped' | 'analysis' | 'detail' | null>(null);
   const callbacks = useRef({ onBoundsChange, onAggregateClick, onCollisionClick, onAnalysisGroupClick, onPopupClose, onSchoolClick });
   callbacks.current = { onBoundsChange, onAggregateClick, onCollisionClick, onAnalysisGroupClick, onPopupClose, onSchoolClick };
   const schoolsRef = useRef(schools);
@@ -234,7 +252,7 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     const updateDisplay = (): Promise<void> | undefined => {
       if (!readyRef.current) return undefined;
       const markers = [...viewMarkers(viewRef.current, map), ...analysisMarkers(analysisRef.current, map), ...schoolMarkers(schoolsRef.current, map)];
-      const groups = layoutScreenMarkers(markers, { gap: 6, maxGroupRadius: 26, maxGroupSpan: 72, clusterDistance: 34, maxDisplayDisplacement: 8 });
+      const groups = layoutScreenMarkers(markers, { individualMarkers: showIndividualCollisions(viewRef.current?.recordCount ?? Number.POSITIVE_INFINITY), gap: 6, maxGroupRadius: 26, maxGroupSpan: 72, clusterDistance: 34, maxDisplayDisplacement: 8 });
       displayGroupsRef.current = new Map(groups.map((group) => [group.id, group]));
       const source = map.getSource('display') as GeoJSONSource | undefined;
       return source?.setData(displayGeoJson(groups, map), true);
@@ -301,9 +319,15 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     window.addEventListener('resize', onWindowResize);
     map.on('click', (event) => {
       const features = map.queryRenderedFeatures(event.point, { layers: ['display-circles', 'display-label'] });
-      const feature = features[0];
-      if (!feature || feature.geometry.type !== 'Point') return;
-      const group = displayGroupsRef.current.get(String(feature.properties?.id ?? feature.id ?? ''));
+      const hitGroups = [...new Map(features
+        .filter((feature) => feature.geometry.type === 'Point')
+        .map((feature) => [String(feature.properties?.id ?? feature.id ?? ''), displayGroupsRef.current.get(String(feature.properties?.id ?? feature.id ?? ''))] as const)
+        .filter((entry): entry is readonly [string, ScreenMarkerGroup] => Boolean(entry[1]))).values()];
+      const feature = features.find((candidate) => candidate.geometry.type === 'Point');
+      if (!feature || feature.geometry.type !== 'Point' || !hitGroups.length) return;
+      const hitMembers = [...new Map(hitGroups.flatMap((hitGroup) => hitGroup.members).map((member) => [member.id, member] as const)).values()];
+      const primaryGroup = hitGroups.find((hitGroup) => hitGroup.members.some((member) => member.kind === 'collision')) ?? hitGroups[0];
+      const group = primaryGroup.members.length === 1 && hitMembers.length > 1 ? collisionPickerGroup(hitMembers, primaryGroup) : primaryGroup;
       if (!group) return;
       if (group.members.length > 1) {
         const bounds = safeGroupBBox(group.bounds);
@@ -330,8 +354,8 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
             callbacks.current.onCollisionClick(member.id, [member.longitude, member.latitude]);
           }
         }));
-        const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; };
-        popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupRef.current = popup.addTo(map);
+        const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; };
+        popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'grouped'; popupRef.current = popup.addTo(map);
         return;
       }
       const member = group.members[0];
@@ -367,12 +391,17 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
       displayGroupsRef.current.clear();
       const popup = popupRef.current;
       if (popup && popupCloseHandlerRef.current) popup.off('close', popupCloseHandlerRef.current);
-      popupCloseHandlerRef.current = null; popupRef.current = null; popup?.remove();
+      popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; popup?.remove();
       map.remove(); mapRef.current = null; readyRef.current = false;
     };
   }, [manifest.extent, initialBBox, initialZoom]);
 
   useEffect(() => {
+    if (popupModeRef.current === 'grouped') {
+      const stalePopup = popupRef.current;
+      if (stalePopup && popupCloseHandlerRef.current) stalePopup.off('close', popupCloseHandlerRef.current);
+      popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; stalePopup?.remove();
+    }
     if (!mapRef.current || !readyRef.current) return;
     hideDisplayRef.current?.();
     scheduleLayoutRef.current?.(true);
@@ -383,17 +412,17 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     const map = mapRef.current; if (!map || !readyRef.current) return;
     const oldPopup = popupRef.current;
     if (oldPopup && popupCloseHandlerRef.current) oldPopup.off('close', popupCloseHandlerRef.current);
-    popupCloseHandlerRef.current = null; popupRef.current = null; oldPopup?.remove();
+    popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; oldPopup?.remove();
     if (selectedAnalysisGroup) {
       const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '350px' }).setLngLat([selectedAnalysisGroup.anchor.longitude, selectedAnalysisGroup.anchor.latitude]).setDOMContent(analysisGroupPopup(selectedAnalysisGroup));
-      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; callbacks.current.onPopupClose(); };
-      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupRef.current = popup.addTo(map);
+      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; callbacks.current.onPopupClose(); };
+      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'analysis'; popupRef.current = popup.addTo(map);
       return;
     }
     if (detail && selectedCollisionId && selectedPointRef.current) {
       const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '330px' }).setLngLat(selectedPointRef.current).setDOMContent(detailPopup(detail));
-      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; callbacks.current.onPopupClose(); };
-      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupRef.current = popup.addTo(map);
+      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; callbacks.current.onPopupClose(); };
+      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'detail'; popupRef.current = popup.addTo(map);
     }
   }, [detail, selectedAnalysisGroup, selectedCollisionId, selectedPoint]);
   return <div ref={containerRef} className="map-canvas" role="application" aria-label="Interactive map of reported road injury collisions" />;
