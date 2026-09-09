@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INDIVIDUAL_COLLISION_LIMIT, layoutScreenMarkers, screenMarkerGap, showIndividualCollisions, type ScreenMarker } from './screenMarkers';
+import { layoutScreenMarkers, screenMarkerGap, showIndividualMarkers, type ScreenMarker } from './screenMarkers';
 
 const marker = (id: string, x: number, y: number, kind: ScreenMarker['kind'] = 'collision', overrides: Partial<ScreenMarker> = {}): ScreenMarker => ({
   id, x, y, radius: 8, kind, weight: 1, longitude: x / 100, latitude: y / 100, ...overrides,
@@ -12,22 +12,20 @@ const expectGap = (groups: ReturnType<typeof layoutScreenMarkers>, minimum = 6):
 };
 
 describe('screen marker layout', () => {
-  it('keeps small collision results as individual exact-coordinate markers at the threshold', () => {
-    expect(showIndividualCollisions(0)).toBe(true);
-    expect(showIndividualCollisions(22)).toBe(true);
-    expect(showIndividualCollisions(199)).toBe(true);
-    expect(showIndividualCollisions(INDIVIDUAL_COLLISION_LIMIT)).toBe(false);
+  it('keeps point responses individual at any supported count and groups aggregate responses', () => {
+    expect(showIndividualMarkers('points')).toBe(true);
+    expect(showIndividualMarkers('aggregates')).toBe(false);
 
-    const collisions = Array.from({ length: 22 }, (_, index) => marker(`collision-${index}`, 50, 50, 'collision', {
+    const collisions = Array.from({ length: 454 }, (_, index) => marker(`collision-${index}`, 50, 50, 'collision', {
       longitude: -2.5 + index * 0.0001,
       latitude: 51 + index * 0.0001,
       severity: index % 2 ? 'serious' : 'slight',
     }));
     const persistent = marker('analysis:site-1', 50, 50, 'analysis', { weight: 3, label: '3' });
     const school = marker('school:school-1', 50, 50, 'school');
-    const groups = layoutScreenMarkers([...collisions, persistent, school], { individualMarkers: true });
+    const groups = layoutScreenMarkers([...collisions, persistent, school], { individualMarkers: showIndividualMarkers('points') });
     const collisionGroups = groups.filter((group) => group.members[0]?.kind === 'collision');
-    expect(collisionGroups).toHaveLength(22);
+    expect(collisionGroups).toHaveLength(454);
     expect(collisionGroups.every((group) => group.members.length === 1)).toBe(true);
     expect(new Set(collisionGroups.map((group) => group.members[0]?.id))).toEqual(new Set(collisions.map((item) => item.id)));
     expect(collisionGroups.every((group) => {
@@ -38,12 +36,17 @@ describe('screen marker layout', () => {
     expect(groups.some((group) => group.members.some((member) => member.id === persistent.id) && group.members.length === 1)).toBe(true);
     expect(groups.some((group) => group.members.some((member) => member.id === school.id) && group.members.length === 1)).toBe(true);
 
-    const boundaryCollisions = Array.from({ length: 200 }, (_, index) => marker(`boundary-${index}`, 20, 20, 'collision'));
-    const individual = layoutScreenMarkers(boundaryCollisions.slice(0, 199), { individualMarkers: showIndividualCollisions(199) });
-    const grouped = layoutScreenMarkers(boundaryCollisions, { individualMarkers: showIndividualCollisions(200) });
-    expect(individual).toHaveLength(199);
-    expect(grouped).toHaveLength(1);
-    expect(grouped[0].collisionCount).toBe(200);
+    for (const count of [200, 2_000]) {
+      const pointRecords = Array.from({ length: count }, (_, index) => marker(`point-${count}-${index}`, 20, 20, 'collision'));
+      const pointGroups = layoutScreenMarkers(pointRecords, { individualMarkers: showIndividualMarkers('points') });
+      expect(pointGroups).toHaveLength(count);
+      expect(pointGroups.every((group) => group.members.length === 1 && group.x === group.members[0].x && group.y === group.members[0].y)).toBe(true);
+    }
+
+    const aggregateRecords = Array.from({ length: 2_000 }, (_, index) => marker(`aggregate-${index}`, 20, 20, 'aggregate', { collisionCount: 1 }));
+    const aggregateGroups = layoutScreenMarkers(aggregateRecords, { individualMarkers: showIndividualMarkers('aggregates') });
+    expect(aggregateGroups).toHaveLength(1);
+    expect(aggregateGroups[0].collisionCount).toBe(2_000);
   });
 
   it('keeps every rendered circle at least six pixels clear of every other circle', () => {

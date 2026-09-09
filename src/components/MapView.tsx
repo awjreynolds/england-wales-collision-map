@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type StyleSpecification } from 'maplibre-gl';
 import type { AnalysisGroup, BBox, CollisionDetail, DatasetManifest, SchoolRecord, ViewPayload } from '../../service/contract';
 import { SEVERITY_STYLES } from '../domain/config';
-import { layoutScreenMarkers, showIndividualCollisions, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
+import { layoutScreenMarkers, showIndividualMarkers, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 interface MapViewProps {
@@ -43,11 +43,11 @@ const pointMarker = (marker: Omit<ScreenMarker, 'x' | 'y'>, map: MapLibreMap): S
 const viewMarkers = (view: ViewPayload | null, map: MapLibreMap): ScreenMarker[] => {
   if (!view) return [];
   const zoom = map.getZoom();
-  const individualCollisions = showIndividualCollisions(view.recordCount);
+  const individualMarkers = showIndividualMarkers(view.mode);
   return view.features.features.map((feature) => {
     const properties = feature.properties;
     const [longitude, latitude] = feature.geometry.coordinates;
-    if (properties.kind === 'aggregate') return pointMarker({ id: String(feature.id ?? `aggregate:${longitude}:${latitude}`), longitude, latitude, kind: 'aggregate', radius: aggregateRadius(properties.count) + 1, weight: Math.max(1, properties.count), collisionCount: properties.count, bounds: properties.bbox, label: individualCollisions ? '' : String(properties.count), data: properties }, map);
+    if (properties.kind === 'aggregate') return pointMarker({ id: String(feature.id ?? `aggregate:${longitude}:${latitude}`), longitude, latitude, kind: 'aggregate', radius: aggregateRadius(properties.count) + 1, weight: Math.max(1, properties.count), collisionCount: properties.count, bounds: properties.bbox, label: individualMarkers ? '' : String(properties.count), data: properties }, map);
     return pointMarker({ id: String(feature.id ?? properties.id), longitude, latitude, kind: 'collision', radius: collisionRadius(zoom) + 1, weight: 1, collisionCount: 1, label: '', severity: properties.severity, data: properties }, map);
   });
 };
@@ -252,7 +252,7 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     const updateDisplay = (): Promise<void> | undefined => {
       if (!readyRef.current) return undefined;
       const markers = [...viewMarkers(viewRef.current, map), ...analysisMarkers(analysisRef.current, map), ...schoolMarkers(schoolsRef.current, map)];
-      const groups = layoutScreenMarkers(markers, { individualMarkers: showIndividualCollisions(viewRef.current?.recordCount ?? Number.POSITIVE_INFINITY), gap: 6, maxGroupRadius: 26, maxGroupSpan: 72, clusterDistance: 34, maxDisplayDisplacement: 8 });
+      const groups = layoutScreenMarkers(markers, { individualMarkers: showIndividualMarkers(viewRef.current?.mode ?? 'aggregates'), gap: 6, maxGroupRadius: 26, maxGroupSpan: 72, clusterDistance: 34, maxDisplayDisplacement: 8 });
       displayGroupsRef.current = new Map(groups.map((group) => [group.id, group]));
       const source = map.getSource('display') as GeoJSONSource | undefined;
       return source?.setData(displayGeoJson(groups, map), true);

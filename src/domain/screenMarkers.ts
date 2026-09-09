@@ -90,8 +90,8 @@ const DEFAULTS: Required<ScreenMarkerLayoutOptions> = {
   maxDisplayDisplacement: 8,
 };
 
-export const INDIVIDUAL_COLLISION_LIMIT = 200;
-export const showIndividualCollisions = (recordCount: number): boolean => Number.isFinite(recordCount) && recordCount < INDIVIDUAL_COLLISION_LIMIT;
+export type ScreenMarkerViewMode = 'points' | 'aggregates';
+export const showIndividualMarkers = (mode: ScreenMarkerViewMode): boolean => mode === 'points';
 
 const finite = (value: number, fallback = 0): number => Number.isFinite(value) ? value : fallback;
 const markerWeight = (marker: ScreenMarker): number => Math.max(0, finite(marker.weight, 0));
