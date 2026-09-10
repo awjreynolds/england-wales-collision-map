@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type StyleSpecification } from 'maplibre-gl';
+import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type PointLike, type StyleSpecification } from 'maplibre-gl';
 import type { AnalysisGroup, BBox, CollisionDetail, DatasetManifest, SchoolRecord, ViewPayload } from '../../service/contract';
 import { SEVERITY_STYLES } from '../domain/config';
 import { layoutScreenMarkers, showIndividualMarkers, type ScreenMarker, type ScreenMarkerGroup } from '../domain/screenMarkers';
@@ -111,6 +111,44 @@ const detailPopup = (detail: CollisionDetail): HTMLElement => {
   addDetail(list, 'Road', detail.roadNumber ? `${detail.roadNumber}${detail.roadName ? ` · ${detail.roadName}` : ''}` : detail.roadName);
   root.append(list); return root;
 };
+const collisionSummaryPopup = (member: ScreenMarker, clicked = false): HTMLElement => {
+  const root = document.createElement('article'); root.className = 'map-popup';
+  const title = document.createElement('h3'); title.textContent = 'Reported collision'; root.append(title);
+  const data = member.data as { year?: unknown; severity?: unknown; authorityName?: unknown; authorityCode?: unknown } | undefined;
+  const list = document.createElement('dl');
+  addDetail(list, 'Year', data?.year);
+  addDetail(list, 'Severity', typeof data?.severity === 'string' ? data.severity[0].toUpperCase() + data.severity.slice(1) : data?.severity);
+  addDetail(list, 'Authority', data?.authorityName ?? data?.authorityCode);
+  addDetail(list, 'Collision ID', member.id);
+  root.append(list);
+  const note = document.createElement('p'); note.className = 'popup-note'; note.textContent = clicked ? 'Loading linked casualty and vehicle evidence…' : 'Click for full collision details.'; root.append(note);
+  return root;
+};
+const schoolPopup = (school: SchoolRecord): HTMLElement => {
+  const root = document.createElement('article'); root.className = 'map-popup';
+  const title = document.createElement('h3'); title.textContent = school.name; root.append(title);
+  const list = document.createElement('dl');
+  addDetail(list, 'Phase', school.phase);
+  addDetail(list, 'Status', school.status);
+  addDetail(list, 'Country', school.country);
+  root.append(list);
+  return root;
+};
+const aggregatePopup = (member: ScreenMarker, onZoom: (() => void) | null): HTMLElement => {
+  const root = document.createElement('article'); root.className = 'map-popup';
+  const title = document.createElement('h3'); title.textContent = 'Aggregated collisions'; root.append(title);
+  const data = member.data as { count?: unknown; collisionSeverity?: { fatal?: unknown; serious?: unknown; slight?: unknown; unknown?: unknown }; ksiCollisions?: unknown; yearsRepresented?: unknown[] } | undefined;
+  const list = document.createElement('dl');
+  addDetail(list, 'Collision count', data?.count ?? member.collisionCount);
+  addDetail(list, 'Years', data?.yearsRepresented?.join(' · '));
+  if (data?.collisionSeverity) addDetail(list, 'Collision harm', `${data.collisionSeverity.fatal ?? 0} fatal · ${data.collisionSeverity.serious ?? 0} serious · ${data.collisionSeverity.slight ?? 0} slight`);
+  addDetail(list, 'KSI collisions', data?.ksiCollisions);
+  root.append(list);
+  if (onZoom) {
+    const zoom = document.createElement('button'); zoom.type = 'button'; zoom.className = 'text-button'; zoom.textContent = 'Zoom to this area'; zoom.addEventListener('click', onZoom); root.append(zoom);
+  }
+  return root;
+};
 const nullableMetric = (metric: { value: number | null; unknownRecords: number }): string => {
   if (metric.value === null) return metric.unknownRecords ? `Not recorded (${metric.unknownRecords})` : 'Not recorded';
   return metric.unknownRecords ? `${metric.value} (${metric.unknownRecords} not recorded)` : String(metric.value);
@@ -180,6 +218,8 @@ const ensureSource = (map: MapLibreMap, id: string, data: GeoJSON.GeoJSON, optio
   if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data, ...(options ?? {}) } as maplibregl.GeoJSONSourceSpecification);
 };
 type PendingCameraAction = { kind: 'reset'; order: number } | { kind: 'focus'; order: number; bbox: BBox };
+type PopupMode = 'hover' | 'grouped' | 'analysis' | 'detail' | 'collision-summary' | 'school' | 'aggregate';
+type PopupSpec = { mode: PopupMode; key: string; point: [number, number]; content: HTMLElement; pinned: boolean };
 
 export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, analysisGroups, resetSignal, focusBBox, selectedCollisionId, selectedPoint, selectedAnalysisGroup, detail, onBoundsChange, onAggregateClick, onCollisionClick, onAnalysisGroupClick, onPopupClose, onSchoolClick }: MapViewProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -187,7 +227,19 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
   const readyRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const popupCloseHandlerRef = useRef<(() => void) | null>(null);
-  const popupModeRef = useRef<'grouped' | 'analysis' | 'detail' | null>(null);
+  const popupModeRef = useRef<PopupMode | null>(null);
+  const popupKeyRef = useRef<string | null>(null);
+  const popupPinnedRef = useRef(false);
+  const popupPointerCleanupRef = useRef<(() => void) | null>(null);
+  const hoverInsidePopupRef = useRef(false);
+  const hoverTimerRef = useRef<number | null>(null);
+  const hoverCloseTimerRef = useRef<number | null>(null);
+  const hoverPendingKeyRef = useRef<string | null>(null);
+  const activeInteractionRef = useRef<string | null>(null);
+  const selectedAnalysisPropKeyRef = useRef<string | null>(null);
+  const selectedCollisionPropIdRef = useRef<string | null>(null);
+  const popupRenderRef = useRef<((spec: PopupSpec) => void) | null>(null);
+  const popupDismissRef = useRef<((notify?: boolean) => void) | null>(null);
   const callbacks = useRef({ onBoundsChange, onAggregateClick, onCollisionClick, onAnalysisGroupClick, onPopupClose, onSchoolClick });
   callbacks.current = { onBoundsChange, onAggregateClick, onCollisionClick, onAnalysisGroupClick, onPopupClose, onSchoolClick };
   const schoolsRef = useRef(schools);
@@ -286,7 +338,7 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     scheduleLayoutRef.current = scheduleLayout;
     hideDisplayRef.current = hideDisplay;
     const report = () => callbacks.current.onBoundsChange(mapBBox(map), map.getZoom());
-    const onMoveStart = () => hideDisplay();
+    const onMoveStart = () => { hideDisplay(); if (!popupPinnedRef.current) popupDismissRef.current?.(); };
     const onMove = () => scheduleLayout();
     const onMoveEnd = () => { report(); scheduleLayout(true); };
     const onWindowResize = () => { hideDisplay(); map.resize(); scheduleLayout(true); };
@@ -317,91 +369,248 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
     map.on('move', onMove);
     map.on('moveend', onMoveEnd);
     window.addEventListener('resize', onWindowResize);
-    map.on('click', (event) => {
-      const features = map.queryRenderedFeatures(event.point, { layers: ['display-circles', 'display-label'] });
+    type Hit = { group: ScreenMarkerGroup; point: [number, number] };
+    const hitAt = (point: PointLike): Hit | null => {
+      const features = map.queryRenderedFeatures(point, { layers: ['display-circles', 'display-label'] });
       const hitGroups = [...new Map(features
         .filter((feature) => feature.geometry.type === 'Point')
         .map((feature) => [String(feature.properties?.id ?? feature.id ?? ''), displayGroupsRef.current.get(String(feature.properties?.id ?? feature.id ?? ''))] as const)
         .filter((entry): entry is readonly [string, ScreenMarkerGroup] => Boolean(entry[1]))).values()];
       const feature = features.find((candidate) => candidate.geometry.type === 'Point');
-      if (!feature || feature.geometry.type !== 'Point' || !hitGroups.length) return;
+      if (!feature || feature.geometry.type !== 'Point' || !hitGroups.length) return null;
       const hitMembers = [...new Map(hitGroups.flatMap((hitGroup) => hitGroup.members).map((member) => [member.id, member] as const)).values()];
       const primaryGroup = hitGroups.find((hitGroup) => hitGroup.members.some((member) => member.kind === 'collision')) ?? hitGroups[0];
       const group = primaryGroup.members.length === 1 && hitMembers.length > 1 ? collisionPickerGroup(hitMembers, primaryGroup) : primaryGroup;
-      if (!group) return;
-      if (group.members.length > 1) {
-        const bounds = safeGroupBBox(group.bounds);
-        const point = feature.geometry.coordinates as [number, number];
-        const geographicSpan = Math.max(group.bounds.east - group.bounds.west, group.bounds.north - group.bounds.south);
-        const shouldZoom = map.getZoom() < 15 && geographicSpan > 0.0001;
-        if (shouldZoom) callbacks.current.onAggregateClick(bounds);
-        const oldPopup = popupRef.current;
-        if (oldPopup && popupCloseHandlerRef.current) oldPopup.off('close', popupCloseHandlerRef.current);
-        oldPopup?.remove();
-        const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '350px' }).setLngLat(point).setDOMContent(groupedMarkerPopup(group, shouldZoom ? () => callbacks.current.onAggregateClick(bounds) : null, (member) => {
-          popup.remove();
-          if (member.kind === 'school') {
-            const school = schoolsRef.current.find((candidate) => candidate.id === member.id.slice('school:'.length));
-            if (school) callbacks.current.onSchoolClick(school);
-          } else if (member.kind === 'analysis') {
-            const analysis = analysisRef.current.find((candidate) => candidate.id === member.id.slice('analysis:'.length));
-            if (analysis) callbacks.current.onAnalysisGroupClick(analysis);
-          } else if (member.kind === 'aggregate') {
-            const data = member.data as { bbox?: unknown } | undefined;
-            const memberBBox = propertyBBox(data?.bbox);
-            if (memberBBox) callbacks.current.onAggregateClick(memberBBox);
-          } else {
-            callbacks.current.onCollisionClick(member.id, [member.longitude, member.latitude]);
-          }
-        }));
-        const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; };
-        popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'grouped'; popupRef.current = popup.addTo(map);
+      return group ? { group, point: feature.geometry.coordinates as [number, number] } : null;
+    };
+    const isSelectionMode = (mode: PopupMode | null): boolean => mode === 'analysis' || mode === 'detail' || mode === 'collision-summary';
+    const clearHoverTimer = () => {
+      if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    };
+    const clearHoverCloseTimer = () => {
+      if (hoverCloseTimerRef.current !== null) window.clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    };
+    const dismissPopup = (notify = false) => {
+      clearHoverTimer();
+      clearHoverCloseTimer();
+      hoverPendingKeyRef.current = null;
+      hoverInsidePopupRef.current = false;
+      const popup = popupRef.current;
+      const mode = popupModeRef.current;
+      if (!popup) {
+        popupPinnedRef.current = false;
+        popupKeyRef.current = null;
+        popupModeRef.current = null;
+        activeInteractionRef.current = null;
         return;
       }
-      const member = group.members[0];
+      if (popupCloseHandlerRef.current) popup.off('close', popupCloseHandlerRef.current);
+      popupPointerCleanupRef.current?.();
+      popupPointerCleanupRef.current = null;
+      popupCloseHandlerRef.current = null;
+      popupRef.current = null;
+      popupKeyRef.current = null;
+      popupModeRef.current = null;
+      popupPinnedRef.current = false;
+      activeInteractionRef.current = null;
+      popup.remove();
+      if (notify && isSelectionMode(mode)) callbacks.current.onPopupClose();
+    };
+    popupDismissRef.current = dismissPopup;
+    const attachPopupPointer = (popup: maplibregl.Popup) => {
+      popupPointerCleanupRef.current?.();
+      popupPointerCleanupRef.current = null;
+      if (popupModeRef.current !== 'hover') return;
+      const element = popup.getElement();
+      if (!element) return;
+      const onEnter = () => { hoverInsidePopupRef.current = true; clearHoverCloseTimer(); };
+      const onLeave = () => {
+        hoverInsidePopupRef.current = false;
+        if (!popupPinnedRef.current) {
+          clearHoverCloseTimer();
+          hoverCloseTimerRef.current = window.setTimeout(() => {
+            hoverCloseTimerRef.current = null;
+            if (!popupPinnedRef.current && !hoverInsidePopupRef.current && popupModeRef.current === 'hover') dismissPopup();
+          }, 240);
+        }
+      };
+      element.addEventListener('mouseenter', onEnter);
+      element.addEventListener('mouseleave', onLeave);
+      popupPointerCleanupRef.current = () => { element.removeEventListener('mouseenter', onEnter); element.removeEventListener('mouseleave', onLeave); };
+    };
+    const renderPopup = (spec: PopupSpec) => {
+      const existing = popupRef.current;
+      if (existing && popupKeyRef.current === spec.key) {
+        existing.setLngLat(spec.point).setDOMContent(spec.content);
+        popupModeRef.current = spec.mode;
+        popupPinnedRef.current = popupPinnedRef.current || spec.pinned;
+        attachPopupPointer(existing);
+        return;
+      }
+      const interaction = activeInteractionRef.current;
+      dismissPopup();
+      activeInteractionRef.current = interaction;
+      const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: spec.mode === 'detail' ? '330px' : '350px' }).setLngLat(spec.point).setDOMContent(spec.content);
+      const closeHandler = () => {
+        if (popupRef.current !== popup) return;
+        const mode = popupModeRef.current;
+        popupPointerCleanupRef.current?.();
+        popupPointerCleanupRef.current = null;
+        popupCloseHandlerRef.current = null;
+        popupRef.current = null;
+        popupKeyRef.current = null;
+        popupModeRef.current = null;
+        popupPinnedRef.current = false;
+        activeInteractionRef.current = null;
+        if (isSelectionMode(mode)) callbacks.current.onPopupClose();
+      };
+      popup.on('close', closeHandler);
+      popupCloseHandlerRef.current = closeHandler;
+      popupKeyRef.current = spec.key;
+      popupModeRef.current = spec.mode;
+      popupPinnedRef.current = spec.pinned;
+      popupRef.current = popup.addTo(map);
+      attachPopupPointer(popup);
+    };
+    popupRenderRef.current = renderPopup;
+    const popupKeyForMember = (member: ScreenMarker): string => `${member.kind}:${member.id}`;
+    const prepareClick = (mode: PopupMode, key: string) => {
+      const previousMode = popupModeRef.current;
+      const previousKey = popupKeyRef.current;
+      if (popupPinnedRef.current && isSelectionMode(previousMode) && (previousMode !== mode || previousKey !== key) && mode !== 'analysis' && mode !== 'collision-summary') callbacks.current.onPopupClose();
+      activeInteractionRef.current = key;
+    };
+    const handleMarkerClick = (member: ScreenMarker, point: [number, number]) => {
+      const key = popupKeyForMember(member);
       if (member.kind === 'school') {
         const schoolId = member.id.slice('school:'.length);
-        const school = schoolsRef.current.find((candidate) => candidate.id === schoolId);
-        if (school) callbacks.current.onSchoolClick(school);
+        const school = schoolsRef.current.find((candidate) => candidate.id === schoolId) ?? member.data as SchoolRecord | undefined;
+        if (!school) return;
+        prepareClick('school', key);
+        renderPopup({ mode: 'school', key, point, content: schoolPopup(school), pinned: true });
+        callbacks.current.onSchoolClick(school);
         return;
       }
       if (member.kind === 'analysis') {
         const analysisId = member.id.slice('analysis:'.length);
-        const analysis = analysisRef.current.find((candidate) => candidate.id === analysisId);
-        if (analysis) callbacks.current.onAnalysisGroupClick(analysis);
+        const analysis = analysisRef.current.find((candidate) => candidate.id === analysisId) ?? member.data as AnalysisGroup | undefined;
+        if (!analysis) return;
+        prepareClick('analysis', key);
+        renderPopup({ mode: 'analysis', key, point, content: analysisGroupPopup(analysis), pinned: true });
+        callbacks.current.onAnalysisGroupClick(analysis);
         return;
       }
       if (member.kind === 'aggregate') {
         const data = member.data as { bbox?: unknown } | undefined;
         const bbox = propertyBBox(data?.bbox);
-        if (bbox) callbacks.current.onAggregateClick(bbox);
+        prepareClick('aggregate', key);
+        renderPopup({ mode: 'aggregate', key, point, content: aggregatePopup(member, bbox ? () => callbacks.current.onAggregateClick(bbox) : null), pinned: true });
         return;
       }
+      prepareClick('collision-summary', key);
+      renderPopup({ mode: 'collision-summary', key, point, content: collisionSummaryPopup(member, true), pinned: true });
       callbacks.current.onCollisionClick(member.id, [member.longitude, member.latitude]);
-    });
+    };
+    const hoverPopupFor = (hit: Hit) => {
+      const { group, point } = hit;
+      if (group.members.length > 1) {
+        const bounds = safeGroupBBox(group.bounds);
+        renderPopup({ mode: 'hover', key: `hover:${group.id}`, point, content: groupedMarkerPopup(group, () => callbacks.current.onAggregateClick(bounds), (member) => handleMarkerClick(member, [member.longitude, member.latitude])), pinned: false });
+        return;
+      }
+      const member = group.members[0];
+      if (member.kind === 'school') {
+        const school = schoolsRef.current.find((candidate) => candidate.id === member.id.slice('school:'.length)) ?? member.data as SchoolRecord | undefined;
+        if (school) renderPopup({ mode: 'hover', key: `hover:${member.id}`, point, content: schoolPopup(school), pinned: false });
+      } else if (member.kind === 'analysis') {
+        const analysis = analysisRef.current.find((candidate) => candidate.id === member.id.slice('analysis:'.length)) ?? member.data as AnalysisGroup | undefined;
+        if (analysis) renderPopup({ mode: 'hover', key: `hover:${member.id}`, point, content: analysisGroupPopup(analysis), pinned: false });
+      } else if (member.kind === 'aggregate') {
+        const data = member.data as { bbox?: unknown } | undefined;
+        const bbox = propertyBBox(data?.bbox);
+        renderPopup({ mode: 'hover', key: `hover:${member.id}`, point, content: aggregatePopup(member, bbox ? () => callbacks.current.onAggregateClick(bbox) : null), pinned: false });
+      } else {
+        renderPopup({ mode: 'hover', key: `hover:${member.id}`, point, content: collisionSummaryPopup(member), pinned: false });
+      }
+    };
+    const scheduleHoverClose = () => {
+      if (popupPinnedRef.current) return;
+      clearHoverTimer();
+      clearHoverCloseTimer();
+      hoverPendingKeyRef.current = null;
+      hoverCloseTimerRef.current = window.setTimeout(() => {
+        hoverCloseTimerRef.current = null;
+        if (!popupPinnedRef.current && !hoverInsidePopupRef.current && popupModeRef.current === 'hover') dismissPopup();
+      }, 240);
+    };
+    const onMouseMove = (event: maplibregl.MapMouseEvent) => {
+      if (popupPinnedRef.current) return;
+      const hit = hitAt(event.point);
+      if (!hit) { scheduleHoverClose(); return; }
+      const key = `hover:${hit.group.id}`;
+      clearHoverCloseTimer();
+      if (popupModeRef.current === 'hover' && popupKeyRef.current === key) return;
+      if (hoverPendingKeyRef.current === key) return;
+      clearHoverTimer();
+      hoverPendingKeyRef.current = key;
+      hoverTimerRef.current = window.setTimeout(() => {
+        hoverTimerRef.current = null;
+        hoverPendingKeyRef.current = null;
+        if (!popupPinnedRef.current) hoverPopupFor(hit);
+      }, 140);
+    };
+    const onMapMouseOut = () => scheduleHoverClose();
+    const onMapClick = (event: maplibregl.MapMouseEvent) => {
+      clearHoverTimer();
+      const hit = hitAt(event.point);
+      if (!hit) { dismissPopup(true); return; }
+      hoverPendingKeyRef.current = null;
+      const { group, point } = hit;
+      if (group.members.length > 1) {
+        const bounds = safeGroupBBox(group.bounds);
+        prepareClick('grouped', `group:${group.id}`);
+        renderPopup({ mode: 'grouped', key: `group:${group.id}`, point, content: groupedMarkerPopup(group, () => callbacks.current.onAggregateClick(bounds), (member) => handleMarkerClick(member, [member.longitude, member.latitude])), pinned: true });
+        return;
+      }
+      handleMarkerClick(group.members[0], point);
+    };
+    map.on('click', onMapClick);
+    map.on('mousemove', onMouseMove);
+    map.on('mouseout', onMapMouseOut);
+    map.on('mouseleave', onMapMouseOut);
     for (const layer of ['display-circles', 'display-label']) {
-      map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
+      const onEnter = () => { map.getCanvas().style.cursor = 'pointer'; clearHoverCloseTimer(); };
+      const onLeave = (event: maplibregl.MapMouseEvent) => { map.getCanvas().style.cursor = hitAt(event.point) ? 'pointer' : ''; };
+      map.on('mouseenter', layer, onEnter);
+      map.on('mouseleave', layer, onLeave);
     }
     return () => {
       if (layoutFrame) cancelAnimationFrame(layoutFrame);
       window.removeEventListener('resize', onWindowResize);
+      map.off('click', onMapClick);
+      map.off('mousemove', onMouseMove);
+      map.off('mouseout', onMapMouseOut);
+      map.off('mouseleave', onMapMouseOut);
+      clearHoverTimer();
+      clearHoverCloseTimer();
+      popupRenderRef.current = null;
+      popupDismissRef.current = null;
       scheduleLayoutRef.current = null;
       hideDisplayRef.current = null;
       displayGroupsRef.current.clear();
       const popup = popupRef.current;
       if (popup && popupCloseHandlerRef.current) popup.off('close', popupCloseHandlerRef.current);
-      popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; popup?.remove();
+      popupPointerCleanupRef.current?.();
+      popupPointerCleanupRef.current = null;
+      popupCloseHandlerRef.current = null; popupModeRef.current = null; popupKeyRef.current = null; popupPinnedRef.current = false; activeInteractionRef.current = null; popupRef.current = null; popup?.remove();
       map.remove(); mapRef.current = null; readyRef.current = false;
     };
   }, [manifest.extent, initialBBox, initialZoom]);
 
   useEffect(() => {
-    if (popupModeRef.current === 'grouped') {
-      const stalePopup = popupRef.current;
-      if (stalePopup && popupCloseHandlerRef.current) stalePopup.off('close', popupCloseHandlerRef.current);
-      popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; stalePopup?.remove();
-    }
+    if (popupModeRef.current === 'hover') popupDismissRef.current?.();
     if (!mapRef.current || !readyRef.current) return;
     hideDisplayRef.current?.();
     scheduleLayoutRef.current?.(true);
@@ -410,19 +619,28 @@ export const MapView = ({ view, manifest, initialBBox, initialZoom, schools, ana
   useEffect(() => { const map = mapRef.current; if (!map || !readyRef.current || !focusBBox) return; map.fitBounds([[focusBBox.west, focusBBox.south], [focusBBox.east, focusBBox.north]], { padding: 80, maxZoom: 16, duration: 650 }); }, [focusBBox]);
   useEffect(() => {
     const map = mapRef.current; if (!map || !readyRef.current) return;
-    const oldPopup = popupRef.current;
-    if (oldPopup && popupCloseHandlerRef.current) oldPopup.off('close', popupCloseHandlerRef.current);
-    popupCloseHandlerRef.current = null; popupModeRef.current = null; popupRef.current = null; oldPopup?.remove();
+    const activeInteraction = activeInteractionRef.current;
+    const selectedAnalysisKey = selectedAnalysisGroup ? `analysis:${selectedAnalysisGroup.id}` : null;
+    const selectedAnalysisChanged = selectedAnalysisKey !== selectedAnalysisPropKeyRef.current;
+    const previousSelectedCollisionId = selectedCollisionPropIdRef.current;
+    selectedAnalysisPropKeyRef.current = selectedAnalysisKey;
+    selectedCollisionPropIdRef.current = selectedCollisionId;
     if (selectedAnalysisGroup) {
-      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '350px' }).setLngLat([selectedAnalysisGroup.anchor.longitude, selectedAnalysisGroup.anchor.latitude]).setDOMContent(analysisGroupPopup(selectedAnalysisGroup));
-      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; callbacks.current.onPopupClose(); };
-      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'analysis'; popupRef.current = popup.addTo(map);
+      const key = `analysis:${selectedAnalysisGroup.id}`;
+      if (selectedAnalysisChanged || !activeInteraction || activeInteraction === key || popupModeRef.current === 'analysis') {
+        activeInteractionRef.current = key;
+        popupRenderRef.current?.({ mode: 'analysis', key, point: [selectedAnalysisGroup.anchor.longitude, selectedAnalysisGroup.anchor.latitude], content: analysisGroupPopup(selectedAnalysisGroup), pinned: true });
+      }
       return;
     }
+    if (popupModeRef.current === 'analysis' && activeInteraction?.startsWith('analysis:')) popupDismissRef.current?.();
     if (detail && selectedCollisionId && selectedPointRef.current) {
-      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '330px' }).setLngLat(selectedPointRef.current).setDOMContent(detailPopup(detail));
-      const closeHandler = () => { popupRef.current = null; popupCloseHandlerRef.current = null; popupModeRef.current = null; callbacks.current.onPopupClose(); };
-      popup.on('close', closeHandler); popupCloseHandlerRef.current = closeHandler; popupModeRef.current = 'detail'; popupRef.current = popup.addTo(map);
+      const key = `collision:${selectedCollisionId}`;
+      if (!activeInteraction || activeInteraction === key || activeInteraction.startsWith('collision:')) popupRenderRef.current?.({ mode: 'detail', key, point: selectedPointRef.current, content: detailPopup(detail), pinned: true });
+    } else if (popupModeRef.current === 'detail' && activeInteraction?.startsWith('collision:')) {
+      popupDismissRef.current?.();
+    } else if (popupModeRef.current === 'collision-summary' && activeInteraction?.startsWith('collision:') && previousSelectedCollisionId !== null && selectedCollisionId === null) {
+      popupDismissRef.current?.();
     }
   }, [detail, selectedAnalysisGroup, selectedCollisionId, selectedPoint]);
   return <div ref={containerRef} className="map-canvas" role="application" aria-label="Interactive map of reported road injury collisions" />;

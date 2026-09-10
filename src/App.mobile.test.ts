@@ -142,7 +142,7 @@ describe('persistent collision site toggle', () => {
     render(createElement(App));
 
     await waitForInitialMap();
-    expect(screen.getByText('Aggregated cells · click a cell to narrow')).toBeTruthy();
+    expect(screen.getByText('Aggregated cells · click for details and zoom')).toBeTruthy();
     act(() => latestMap().onBoundsChange(extent, 11));
     await waitFor(() => expect(screen.getByText('Dense view grouped · zoom in for individual collisions')).toBeTruthy());
   });
